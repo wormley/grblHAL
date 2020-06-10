@@ -45,7 +45,7 @@
 #endif
 
 #if EEPROM_ENABLE
-#include "..\Inc\eeprom.h"
+#include "eeprom/eeprom.h"
 #endif
 
 #if KEYPAD_ENABLE
@@ -64,42 +64,99 @@ extern __IO uint32_t uwTick;
 
 static bool pwmEnabled = false, IOInitDone = false;
 // Inverts the probe pin state depending on user settings and probing cycle mode.
-static uint8_t probe_invert_mask;
+static bool probe_invert;
 static axes_signals_t next_step_outbits;
 static spindle_pwm_t spindle_pwm;
 static delay_t delay = { .ms = 1, .callback = NULL }; // NOTE: initial ms set to 1 for "resetting" systick timer on startup
+static status_code_t (*syscmd)(uint_fast16_t state, char *line, char *lcline);
 
 #if STEP_OUTMODE == GPIO_MAP
 
-    static const uint32_t c_step_outmap[8] = {
-        0,
-        X_STEP_BIT,
-        Y_STEP_BIT,
-        X_STEP_BIT|Y_STEP_BIT,
-        Z_STEP_BIT,
-        X_STEP_BIT|Z_STEP_BIT,
-        Y_STEP_BIT|Z_STEP_BIT,
-        X_STEP_BIT|Y_STEP_BIT|Z_STEP_BIT
-    };
+static const uint32_t c_step_outmap[] = {
+	0,
+	X_STEP_BIT,
+	Y_STEP_BIT,
+	Y_STEP_BIT | X_STEP_BIT,
+	Z_STEP_BIT,
+	Z_STEP_BIT | X_STEP_BIT,
+	Z_STEP_BIT | Y_STEP_BIT,
+	Z_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+#if N_AXIS > 3
+	A_STEP_BIT,
+	A_STEP_BIT | X_STEP_BIT,
+	A_STEP_BIT | Y_STEP_BIT,
+	A_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+	A_STEP_BIT | Z_STEP_BIT,
+	A_STEP_BIT | Z_STEP_BIT | X_STEP_BIT,
+	A_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT,
+	A_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+#endif
+#if N_AXIS > 4
+	B_STEP_BIT,
+	B_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | Y_STEP_BIT,
+	B_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | Z_STEP_BIT,
+	B_STEP_BIT | Z_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT,
+	B_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Y_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Z_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Z_STEP_BIT | X_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT,
+	B_STEP_BIT | A_STEP_BIT | Z_STEP_BIT | Y_STEP_BIT | X_STEP_BIT,
+#endif
+};
 
-    static uint32_t step_outmap[8];
+static uint32_t step_outmap[sizeof(c_step_outmap) / sizeof(uint32_t)];
 
 #endif
 
 #if DIRECTION_OUTMODE == GPIO_MAP
 
-    static const uint32_t c_dir_outmap[8] = {
-        0,
-        X_DIRECTION_BIT,
-        Y_DIRECTION_BIT,
-        X_DIRECTION_BIT|Y_DIRECTION_BIT,
-        Z_DIRECTION_BIT,
-        X_DIRECTION_BIT|Z_DIRECTION_BIT,
-        Y_DIRECTION_BIT|Z_DIRECTION_BIT,
-        X_DIRECTION_BIT|Y_DIRECTION_BIT|Z_DIRECTION_BIT
-    };
+static const uint32_t c_dir_outmap[] = {
+	0,
+	X_DIRECTION_BIT,
+	Y_DIRECTION_BIT,
+	Y_DIRECTION_BIT | X_DIRECTION_BIT,
+	Z_DIRECTION_BIT,
+	Z_DIRECTION_BIT | X_DIRECTION_BIT,
+	Z_DIRECTION_BIT | Y_DIRECTION_BIT,
+	Z_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+#if N_AXIS > 3
+	A_DIRECTION_BIT,
+	A_DIRECTION_BIT | X_DIRECTION_BIT,
+	A_DIRECTION_BIT | Y_DIRECTION_BIT,
+	A_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+	A_DIRECTION_BIT | Z_DIRECTION_BIT,
+	A_DIRECTION_BIT | Z_DIRECTION_BIT | X_DIRECTION_BIT,
+	A_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT,
+	A_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+#endif
+#if N_AXIS > 4
+	B_DIRECTION_BIT,
+	B_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | Y_DIRECTION_BIT,
+	B_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | Z_DIRECTION_BIT,
+	B_DIRECTION_BIT | Z_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT,
+	B_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Y_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Z_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Z_DIRECTION_BIT | X_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT,
+	B_DIRECTION_BIT | A_DIRECTION_BIT | Z_DIRECTION_BIT | Y_DIRECTION_BIT | X_DIRECTION_BIT,
+#endif
+};
 
-    static uint32_t dir_outmap[8];
+static uint32_t dir_outmap[sizeof(c_dir_outmap) / sizeof(uint32_t)];
 
 #endif
 
@@ -107,18 +164,14 @@ static void spindle_set_speed (uint_fast16_t pwm_value);
 
 static void driver_delay (uint32_t ms, void (*callback)(void))
 {
-     if(callback) {
-        callback();
-        callback = NULL;
-    }
-
     if((delay.ms = ms) > 0) {
         // Restart systick...
         SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
         SysTick->CTRL |= SysTick_CTRL_ENABLE_Msk;
         if(!(delay.callback = callback))
             while(delay.ms);
-    }
+    } else if(callback)
+        callback();
 }
 
 // Enable/disable stepper motors
@@ -151,19 +204,14 @@ static void stepperGoIdle (bool clear_signals)
     STEPPER_TIMER->CNT = 0;
 }
 
-// Sets up stepper driver interrupt timeout, AMASS version
-static void stepperCyclesPerTick (uint32_t cycles_per_tick)
-{
-    STEPPER_TIMER->ARR = (uint16_t)(cycles_per_tick - 1);
-}
 
 // Sets up stepper driver interrupt timeout, "Normal" version
 static void stepperCyclesPerTickPrescaled (uint32_t cycles_per_tick)
 {
     // Set timer prescaling for normal step generation
-    if (cycles_per_tick < (1UL << 16)) { // < 65536  (2.6ms @ 25MHz)
+    if (cycles_per_tick < (1UL << 16)) { // < 65536  (1.1ms @ 72MHz)
         STEPPER_TIMER->PSC = 0; // DIV 1
-    } else if (cycles_per_tick < (1UL << 19)) { // < 524288 (32.8ms@16MHz)
+    } else if (cycles_per_tick < (1UL << 19)) { // < 524288 (8.8ms @ 72MHz)
         STEPPER_TIMER->PSC = 7; // DIV 8
         cycles_per_tick = cycles_per_tick >> 3;
     } else {
@@ -177,14 +225,22 @@ static void stepperCyclesPerTickPrescaled (uint32_t cycles_per_tick)
 // NOTE: step_outbits are: bit0 -> X, bit1 -> Y, bit2 -> Z...
 inline static void stepperSetStepOutputs (axes_signals_t step_outbits)
 {
+#if STEP_OUTMODE == GPIO_MAP
+	STEP_PORT->ODR = (STEP_PORT->ODR & ~STEP_MASK) | step_outmap[step_outbits.value];
+#else
     STEP_PORT->ODR = (STEP_PORT->ODR & ~STEP_MASK) | ((step_outbits.mask ^ settings.steppers.step_invert.mask) << STEP_OUTMODE);
+#endif
 }
 
 // Set stepper direction output pins
 // NOTE: see note for stepperSetStepOutputs()
 inline static void stepperSetDirOutputs (axes_signals_t dir_outbits)
 {
+#if DIRECTION_OUTMODE == GPIO_MAP
+    DIRECTION_PORT->ODR = (DIRECTION_PORT->ODR & ~DIRECTION_MASK) | dir_outmap[dir_outbits.value];
+#else
     DIRECTION_PORT->ODR = (DIRECTION_PORT->ODR & ~DIRECTION_MASK) | ((dir_outbits.mask ^ settings.steppers.dir_invert.mask) << DIRECTION_OUTMODE);
+#endif
 }
 
 // Sets stepper direction and pulse pins and starts a step pulse
@@ -264,16 +320,16 @@ static control_signals_t systemGetState (void)
     control_signals_t signals = {0};
 
 #if CONTROL_INMODE == GPIO_BITBAND
-    signals.reset = BITBAND_PERI(CONTROL_PORT->IDR, RESET_PIN);
-    signals.safety_door_ajar = BITBAND_PERI(CONTROL_PORT->FIIDROPIN, SAFETY_DOOR_PIN);
-    signals.feed_hold = BITBAND_PERI(CONTROL_PORT->IDR, FEED_HOLD_PIN);
-    signals.cycle_start = BITBAND_PERI(CONTROL_PORT->IDR, CYCLE_START_PIN);
+    signals.reset = BITBAND_PERI(CONTROL_PORT->IDR, CONTROL_RESET_PIN);
+    signals.safety_door_ajar = BITBAND_PERI(CONTROL_PORT->IDR, CONTROL_SAFETY_DOOR_PIN);
+    signals.feed_hold = BITBAND_PERI(CONTROL_PORT->IDR, CONTROL_FEED_HOLD_PIN);
+    signals.cycle_start = BITBAND_PERI(CONTROL_PORT->IDR, CONTROL_CYCLE_START_PIN);
 #elif CONTROL_INMODE == GPIO_MAP
     uint32_t bits = CONTROL_PORT->IDR;
-    signals.reset = (bits & RESET_BIT) != 0;
-    signals.safety_door_ajar = (bits & SAFETY_DOOR_BIT) != 0;
-    signals.feed_hold = (bits & FEED_HOLD_BIT) != 0;
-    signals.cycle_start = (bits & CYCLE_START_BIT) != 0;
+    signals.reset = (bits & CONTROL_RESET_BIT) != 0;
+    signals.safety_door_ajar = (bits & CONTROL_SAFETY_DOOR_BIT) != 0;
+    signals.feed_hold = (bits & CONTROL_FEED_HOLD_BIT) != 0;
+    signals.cycle_start = (bits & CONTROL_CYCLE_START_BIT) != 0;
 #else
     signals.value = (uint8_t)((CONTROL_PORT->IDR & CONTROL_MASK) >> CONTROL_INMODE);
 #endif
@@ -289,16 +345,22 @@ static control_signals_t systemGetState (void)
 // and the probing cycle modes for toward-workpiece/away-from-workpiece.
 static void probeConfigureInvertMask(bool is_probe_away)
 {
-  probe_invert_mask = settings.flags.invert_probe_pin ? 0 : PROBE_BIT;
+    probe_invert = settings.flags.invert_probe_pin;
 
-  if (is_probe_away)
-      probe_invert_mask ^= PROBE_BIT;
+    if (is_probe_away)
+        probe_invert ^= PROBE_BIT;
 }
 
-// Returns the probe pin state. Triggered = true.
-bool probeGetState (void)
+// Returns the probe connected and triggered pin states.
+probe_state_t probeGetState (void)
 {
-    return ((PROBE_PORT->IDR & PROBE_BIT) ^ probe_invert_mask) != 0;
+    probe_state_t state = {
+        .connected = On
+    };
+
+    state.triggered = ((PROBE_PORT->IDR & PROBE_BIT) != 0)  ^ probe_invert;
+
+    return state;
 }
 
 // Static spindle (off, on cw & on ccw)
@@ -453,14 +515,24 @@ void settings_changed (settings_t *settings)
 #endif
 
 #if STEP_OUTMODE == GPIO_MAP
-    for(i = 0; i < sizeof(step_outmap) / sizeof(uint32_t); i++)
-        step_outmap[i] = c_step_outmap[i] ^ c_step_outmap[settings->steppers.step_invert.value];
+
+    i = sizeof(step_outmap) / sizeof(uint32_t);
+    do {
+        i--;
+        step_outmap[i] = c_step_outmap[i ^ settings->steppers.step_invert.value];
+    } while(i);
 #endif
 
 #if DIRECTION_OUTMODE == GPIO_MAP
-    for(i = 0; i < sizeof(dir_outmap) / sizeof(uint32_t); i++)
-        dir_outmap[i] = c_dir_outmap[i] ^ c_dir_outmap[settings->steppers.dir_invert.value];
+    i = sizeof(dir_outmap) / sizeof(uint32_t);
+    do {
+        i--;
+        dir_outmap[i] = c_dir_outmap[i ^ settings->steppers.dir_invert.value];
+    } while(i);
 #endif
+
+    stepperSetStepOutputs((axes_signals_t){0});
+    stepperSetDirOutputs((axes_signals_t){0});
 
     if(IOInitDone) {
 
@@ -584,7 +656,7 @@ void settings_changed (settings_t *settings)
             GPIO_Init.Pull = settings->limits.disable_pullup.z ? GPIO_NOPULL : GPIO_PULLUP;
             HAL_GPIO_Init(LIMIT_PORT, &GPIO_Init);
 
-#ifdef A_AXIS
+#ifdef A_LIMIT_BIT
             GPIO_Init.Pin = A_LIMIT_BIT;
             GPIO_Init.Mode = limit_ire.a ? GPIO_MODE_IT_RISING : GPIO_MODE_IT_FALLING;
             GPIO_Init.Pull = settings->limits.disable_pullup.a ? GPIO_NOPULL : GPIO_PULLUP;
@@ -610,7 +682,7 @@ void settings_changed (settings_t *settings)
             GPIO_Init.Pull = settings->limits.disable_pullup.z ? GPIO_NOPULL : GPIO_PULLUP;
             HAL_GPIO_Init(LIMIT_PORT, &GPIO_Init);
 
-#ifdef A_AXIS
+#ifdef A_LIMIT_BIT
             GPIO_Init.Pin = A_LIMIT_BIT;
             GPIO_Init.Pull = settings->limits.disable_pullup.a ? GPIO_NOPULL : GPIO_PULLUP;
             HAL_GPIO_Init(LIMIT_PORT, &GPIO_Init);
@@ -638,8 +710,6 @@ void settings_changed (settings_t *settings)
 #endif
     }
 }
-
-status_code_t (*syscmd)(uint_fast16_t state, char *line, char *lcline);
 
 static status_code_t jtag_enable (uint_fast16_t state, char *line, char *lcline)
 {
@@ -749,6 +819,12 @@ static bool driver_setup (settings_t *settings)
     GPIO_Init.Pin = COOLANT_MIST_BIT;
     HAL_GPIO_Init(COOLANT_MIST_PORT, &GPIO_Init);
 
+    BITBAND_PERI(COOLANT_FLOOD_PORT->ODR, COOLANT_FLOOD_PIN) = 1;
+    BITBAND_PERI(COOLANT_MIST_PORT->ODR, COOLANT_MIST_PIN) = 1;
+
+    BITBAND_PERI(COOLANT_FLOOD_PORT->ODR, COOLANT_FLOOD_PIN) = 0;
+    BITBAND_PERI(COOLANT_MIST_PORT->ODR, COOLANT_MIST_PIN) = 0;
+
 #if SDCARD_ENABLE
 
     GPIO_Init.Mode = GPIO_MODE_OUTPUT_PP;
@@ -758,15 +834,11 @@ static bool driver_setup (settings_t *settings)
     BITBAND_PERI(SD_CS_PORT->ODR, SD_CS_PIN) = 1;
 
     sdcard_init();
-    syscmd = hal.driver_sys_command_execute;
-    hal.driver_sys_command_execute = jtag_enable;
 
 #endif
 
- // Set defaults
-
-    if(hal.driver_cap.amass_level == 0)
-        hal.stepper_cycles_per_tick = &stepperCyclesPerTickPrescaled;
+    syscmd = hal.driver_sys_command_execute;
+    hal.driver_sys_command_execute = jtag_enable;
 
 #if TRINAMIC_ENABLE
 
@@ -774,7 +846,7 @@ static bool driver_setup (settings_t *settings)
 
 #endif
 
-    IOInitDone = settings->version == 15;
+    IOInitDone = settings->version == 16;
 
     settings_changed(settings);
 
@@ -845,12 +917,16 @@ bool driver_init (void)
 #endif
 
 #ifdef I2C_PORT
-    I2C_Init();
+    i2c_init();
 #endif
 
-//  __HAL_AFIO_REMAP_SWJ_NOJTAG();
+    __HAL_AFIO_REMAP_SWJ_NOJTAG();
 
     hal.info = "STM32F103C8";
+    hal.driver_version = "200528";
+#ifdef BOARD_NAME
+    hal.board = BOARD_NAME;
+#endif
     hal.driver_setup = driver_setup;
     hal.f_step_timer = SystemCoreClock;
     hal.rx_buffer_size = RX_BUFFER_SIZE;
@@ -860,7 +936,7 @@ bool driver_init (void)
     hal.stepper_wake_up = stepperWakeUp;
     hal.stepper_go_idle = stepperGoIdle;
     hal.stepper_enable = stepperEnable;
-    hal.stepper_cycles_per_tick = stepperCyclesPerTick;
+    hal.stepper_cycles_per_tick = stepperCyclesPerTickPrescaled;
     hal.stepper_pulse_start = stepperPulseStart;
 
     hal.limits_enable = limitsEnable;
@@ -894,6 +970,7 @@ bool driver_init (void)
     hal.stream.get_rx_buffer_available = usbRxFree;
     hal.stream.reset_read_buffer = usbRxFlush;
     hal.stream.cancel_read_buffer = usbRxCancel;
+    hal.stream.suspend_read = usbSuspendInput;
 #else
     hal.stream.read = serialGetC;
     hal.stream.write = serialWriteS;
@@ -901,6 +978,7 @@ bool driver_init (void)
     hal.stream.get_rx_buffer_available = serialRxFree;
     hal.stream.reset_read_buffer = serialRxFlush;
     hal.stream.cancel_read_buffer = serialRxCancel;
+    hal.stream.suspend_read = serialSuspendInput;
 #endif
 
 #if EEPROM_ENABLE
@@ -947,6 +1025,9 @@ bool driver_init (void)
 
   // driver capabilities, used for announcing and negotiating (with Grbl) driver functionality
 
+#ifdef CONTROL_SAFETY_DOOR_PIN
+    hal.driver_cap.safety_door = On;
+#endif
     hal.driver_cap.spindle_dir = On;
     hal.driver_cap.variable_spindle = On;
     hal.driver_cap.spindle_pwm_invert = On;
@@ -1005,7 +1086,7 @@ void TIM3_IRQHandler(void)
         stepperSetStepOutputs(next_step_outbits);       // begin step pulse
     } else {
         PULSE_TIMER->SR &= ~TIM_SR_UIF;                 // Clear UIF flag and
-        stepperSetStepOutputs((axes_signals_t){0});     // begin step pulse
+        stepperSetStepOutputs((axes_signals_t){0});     // end step pulse
     }
 }
 

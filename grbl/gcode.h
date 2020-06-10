@@ -2,7 +2,7 @@
   gcode.h - rs274/ngc parser.
   Part of Grbl
 
-  Copyright (c) 2017-2019 Terje Io
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
@@ -128,7 +128,7 @@ typedef enum {
 // Define parameter word mapping.
 typedef enum {
     Word_E = 0,
-	Word_F,
+    Word_F,
     Word_H,
     Word_I,
     Word_J,
@@ -144,9 +144,9 @@ typedef enum {
     Word_Z,
     Word_Q,
 #if N_AXIS > 3
-	Word_A,
-	Word_B,
-	Word_C,
+    Word_A,
+    Word_B,
+    Word_C,
 #endif
     Word_D
 } parameter_word_t;
@@ -195,6 +195,7 @@ typedef enum {
     MotionMode_Linear = 1,                  // G1 (Do not alter value)
     MotionMode_CwArc = 2,                   // G2 (Do not alter value)
     MotionMode_CcwArc = 3,                  // G3 (Do not alter value)
+    MotionMode_CubicSpline = 5,             // G5 (Do not alter value)
     MotionMode_SpindleSynchronized = 33,    // G33 (Do not alter value)
     MotionMode_DrillChipBreak = 73,         // G73 (Do not alter value)
     MotionMode_Threading = 76,              // G76 (Do not alter value)
@@ -331,7 +332,7 @@ typedef union {
     uint16_t value;
     struct {
         uint16_t jog_motion          :1,
-                 canned_cycle_change :1,
+                 canned_cycle_change :1, // Use motion_mode_changed?
                  arc_is_clockwise    :1,
                  probe_is_away       :1,
                  probe_is_no_error   :1,
@@ -339,7 +340,8 @@ typedef union {
                  laser_disable       :1,
                  laser_is_motion     :1,
                  set_coolant         :1,
-                 reserved            :7;
+                 motion_mode_changed :1,
+                 reserved            :6;
     };
 } gc_parser_flags_t;
 
@@ -390,7 +392,7 @@ typedef struct {
     feed_mode_t feed_mode;               // {G93,G94}
     bool units_imperial;                 // {G20,G21}
     bool distance_incremental;           // {G90,G91}
-    bool diameter_mode;                  // {G7,G8} Lathe diameter mode
+    bool diameter_mode;                  // {G7,G8} Lathe diameter mode.
     // uint8_t distance_arc;             // {G91.1} NOTE: Don't track. Only default supported.
     plane_select_t plane_select;         // {G17,G18,G19}
     // uint8_t cutter_comp;              // {G40} NOTE: Don't track. Only default supported.
@@ -405,6 +407,7 @@ typedef struct {
     cc_retract_mode_t retract_mode;      // {G98,G99}
     bool scaling_active;                 // {G50,G51}
     bool canned_cycle_active;
+    float spline_pq[2];                  // {G5}
 } gc_modal_t;
 
 typedef struct {
@@ -494,11 +497,11 @@ typedef struct {
     bool is_rpm_rate_adjusted;
     bool tool_change;
     status_code_t last_error;           // last return value from parser
-    //
+    // The following variables are not cleared upon warm restart when COMPATIBILITY_LEVEL <= 1
     float g92_coord_offset[N_AXIS];     // Retains the G92 coordinate offset (work coordinates) relative to
-                                        // machine zero in mm. Non-persistent. Cleared upon reset and boot.
-    float tool_length_offset[N_AXIS];   // Tracks tool length offset value when enabled
-    tool_data_t *tool;                  // Tracks tool number and offset
+                                        // machine zero in mm. Persistent and loaded from EEPROM on boot when COMPATIBILITY_LEVEL <= 1
+    float tool_length_offset[N_AXIS];   // Tracks tool length offset when enabled
+    tool_data_t *tool;                  // Tracks tool number and tool offset
 } parser_state_t;
 
 typedef struct {

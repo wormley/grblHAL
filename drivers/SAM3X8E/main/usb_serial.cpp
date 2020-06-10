@@ -1,10 +1,10 @@
 /*
 
-  usb_serial.cpp - USB serial port wrapper for Arduino MKRZERO
+  usb_serial.cpp - USB serial port wrapper for Arduino Due
 
   Part of GrblHAL
 
-  Copyright (c) 2018-2019 Terje Io
+  Copyright (c) 2018-2020 Terje Io
 
 
   Grbl is free software: you can redistribute it and/or modify
@@ -22,29 +22,46 @@
 
 */
 
+#include <string.h>
+
 #include "Arduino.h"
 
-#include "serial.h"
+#include "driver.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define BLOCK_RX_BUFFER_SIZE 64
+
+#include "usb_serial.h"
+#include "src/grbl/grbl.h"
+
+static stream_block_tx_buffer_t txbuf = {0};
+static char rxbuf[BLOCK_RX_BUFFER_SIZE];
 static stream_rx_buffer_t usb_rxbuffer, usb_rxbackup;
 
 void usb_serialInit(void)
 {
+    txbuf.s = txbuf.data;
+
     SerialUSB.begin(BAUD_RATE);
 
+#if USB_SERIAL_WAIT
     while(!SerialUSB); // Wait for connection
+#endif
+
+    txbuf.max_length = SerialUSB.availableForWrite(); // 511 bytes
+    txbuf.max_length = (txbuf.max_length > BLOCK_TX_BUFFER_SIZE ? BLOCK_TX_BUFFER_SIZE : txbuf.max_length) - 20;    
 }
+
 //
 // Returns number of characters in serial input buffer
 //
 uint16_t usb_serialRxCount (void)
 {
-  uint16_t tail = usb_rxbuffer.tail, head = usb_rxbuffer.head;
-  return BUFCOUNT(head, tail, RX_BUFFER_SIZE);
+    uint_fast16_t tail = usb_rxbuffer.tail, head = usb_rxbuffer.head;
+    return (uint16_t)BUFCOUNT(head, tail, RX_BUFFER_SIZE);
 }
 
 //
@@ -52,16 +69,16 @@ uint16_t usb_serialRxCount (void)
 //
 uint16_t usb_serialRxFree (void)
 {
-  unsigned int tail = usb_rxbuffer.tail, head = usb_rxbuffer.head;
-  return (RX_BUFFER_SIZE - 1) - BUFCOUNT(head, tail, RX_BUFFER_SIZE);
+    uint_fast16_t tail = usb_rxbuffer.tail, head = usb_rxbuffer.head;
+    return (uint16_t)((RX_BUFFER_SIZE - 1) - BUFCOUNT(head, tail, RX_BUFFER_SIZE));
 }
 
 //
-// Flushes the serial input buffer
+// Flushes the serial input buffer including pending in the USB buffer
 //
 void usb_serialRxFlush (void)
 {
-    SerialUSB.flush();
+    while(SerialUSB.read() != -1);
     usb_rxbuffer.head = usb_rxbuffer.tail = 0;
 }
 
@@ -70,7 +87,6 @@ void usb_serialRxFlush (void)
 //
 void usb_serialRxCancel (void)
 {
-    SerialUSB.flush();
     usb_rxbuffer.data[usb_rxbuffer.head] = CMD_RESET;
     usb_rxbuffer.tail = usb_rxbuffer.head;
     usb_rxbuffer.head = (usb_rxbuffer.tail + 1) & (RX_BUFFER_SIZE - 1);
@@ -87,14 +103,47 @@ bool usb_serialPutC (const char c)
 }
 
 //
-// Writes a null terminated string to the serial output stream, blocks if buffer full
+// Writes a null terminated string to the serial output stream, blocks if buffer full.
+// Buffers locally up to 40 characters or until the string is terminated with a ASCII_LF character.
+// NOTE: grbl always sends ASCII_LF terminated strings!
 //
 void usb_serialWriteS (const char *s)
 {
-    char c, *ptr = (char *)s;
+    size_t length = strlen(s);
 
-    while((c = *ptr++) != '\0')
-        usb_serialPutC(c);
+    if(length && (length + txbuf.length) < BLOCK_TX_BUFFER_SIZE) {
+
+        memcpy(txbuf.s, s, length);
+        txbuf.length += length;
+        txbuf.s += length;
+
+        if(s[length - 1] == ASCII_LF || txbuf.length > txbuf.max_length) {
+
+            size_t txfree;
+            txbuf.s = txbuf.data;
+
+            while(txbuf.length) {
+
+                if((txfree = SerialUSB.availableForWrite()) > 10) {
+
+                    length = txfree < txbuf.length ? txfree : txbuf.length;
+
+                    SerialUSB.write((uint8_t *)txbuf.s, length); // doc is wrong - does not return bytes sent!
+//                    SerialUSB.flush();
+
+                    txbuf.length -= length;
+                    txbuf.s += length;
+                }
+
+                if(txbuf.length && !hal.stream_blocking_callback()) {
+                    txbuf.length = 0;
+                    txbuf.s = txbuf.data;
+                    return;
+                }
+            }
+            txbuf.s = txbuf.data;
+        }
+    }
 }
 
 //
@@ -102,8 +151,8 @@ void usb_serialWriteS (const char *s)
 //
 void usb_serialWriteLn (const char *s)
 {
-    serialWriteS(s);
-    serialWriteS(ASCII_EOL);
+    usb_serialWriteS(s);
+    usb_serialWriteS(ASCII_EOL);
 }
 
 //
@@ -150,26 +199,41 @@ bool usb_serialSuspendInput (bool suspend)
 }
 
 //
-// This function get called from the protocol_execute_realtime function,
+// This function get called from the systick interrupt handler,
 // used here to get characters off the USB serial input stream and buffer
 // them for processing by grbl. Real time command characters are stripped out
 // and submitted for realtime processing.
 //
 void usb_execute_realtime (uint_fast16_t state)
 {
-    int data;
+    char c, *dp;
+    int avail, free;
 
-    while((data = SerialUSB.peek()) != -1 ) {
-        SerialUSB.read();
-        if(data == CMD_TOOL_ACK && !usb_rxbuffer.backup) {
-            memcpy(&usb_rxbackup, &usb_rxbuffer, sizeof(stream_rx_buffer_t));
-            usb_rxbuffer.backup = true;
-            usb_rxbuffer.tail = usb_rxbuffer.head;
-            hal.stream.read = usb_serialGetC; // restore normal input
-        } else if(!hal.stream.enqueue_realtime_command(data) && usb_serialRxFree()) {;
-            uint32_t bptr = (usb_rxbuffer.head + 1) & (RX_BUFFER_SIZE - 1); // Get next head pointer,
-            usb_rxbuffer.data[usb_rxbuffer.head] = data;                    // add data to buffer
-            usb_rxbuffer.head = bptr;                                       // and update pointer
+    if((avail = SerialUSB.available())) {
+
+        dp = rxbuf;
+        free = usb_serialRxFree();
+        free = free > BLOCK_RX_BUFFER_SIZE ? BLOCK_RX_BUFFER_SIZE : free;
+        avail = avail > free ? free : avail;
+
+        SerialUSB.readBytes(rxbuf, avail);
+
+        while(avail--) {
+            c = *dp++;
+            if(c == CMD_TOOL_ACK && !usb_rxbuffer.backup) {
+                memcpy(&usb_rxbackup, &usb_rxbuffer, sizeof(stream_rx_buffer_t));
+                usb_rxbuffer.backup = true;
+                usb_rxbuffer.tail = usb_rxbuffer.head;
+                hal.stream.read = usb_serialGetC; // restore normal input
+            } else if(!hal.stream.enqueue_realtime_command(c)) {;
+                uint32_t bptr = (usb_rxbuffer.head + 1) & (RX_BUFFER_SIZE - 1); // Get next head pointer
+                if(bptr == usb_rxbuffer.tail)                                   // If buffer full
+                    usb_rxbuffer.overflow = On;                                 // flag overflow,
+                else {
+                    usb_rxbuffer.data[usb_rxbuffer.head] = c;                   // else add character data to buffer
+                    usb_rxbuffer.head = bptr;                                   // and update pointer
+                }
+            }
         }
     }
 }

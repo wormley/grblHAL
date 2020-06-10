@@ -1,6 +1,26 @@
 ## GrblHAL ##
 ---
 
+Build 20200603:
+* **Important:** settings version has been changed and settings will be restored to defaults after updating. Backup & restore! 
+* Optimizations for ring buffer handling in planner and step generator.
+* New optional input signal for probe connected status, driver support will be added later to selected drivers.
+* Automatic reporting of tool length offset \(`[TLO:...]`\) when changed.
+* Support for [G5](http://www.linuxcnc.org/docs/2.5/html/gcode/gcode.html#sec:G5-Cubic-Spline) \(cubic spline\) added.
+* `G43.x`, `G49` and `G92` added to parser state report.
+* `G76` [threading cycle](https://hackaday.io/project/165248-mini-lathe-emco-compact-5-cnc-conversion) refactored.
+* \(Re\)added `REPORT_PROBE_COORDINATES` and `TOOL_LENGTH_OFFSET_AXIS` [configuration](grbl/config.h) options, the latter available when `COMPATIBILITY_LEVEL` > 2.
+* Improved backwards compatibility with vanilla grbl, e.g. G92 and tool offset\(s\) will be lost on a soft reset. Dependent on `COMPATIBILITY_LEVEL` setting.
+* Board name added to `$I` report if provided by driver.
+* [Grbl-Sim](https://github.com/grbl/grbl-sim) ported to grblHAL as a [driver](drivers/Simulator). Added telnet support++. Can be used to test senders. Note: currently only compiled/tested for Linux.
+* Some minor bug fixes.
+
+---
+
+Build 20200503: Added configuration flag for manual homing. \(Re\)added compile time option `ENABLE_SAFETY_DOOR_INPUT_PIN` for [safety door switch](https://github.com/terjeio/grblHAL/blob/master/grbl/config.h), default is now disabled. Some bug fixes and "hardening" of code.
+
+---
+
 Added some [template code](./templates/README.md) to aid customizations such as driver support for M62 - M68 M-codes mentioned below.
 
 ---
@@ -54,7 +74,7 @@ I am currently running this version in three CNC machines, a CO2 laser \(TM4C123
 List of Supported G-Codes in GrblHAL v1.1:
   - Non-Modal Commands: G4, G10L2, G10L20, G28, G30, G28.1, G30.1, G53, G92, G92.1
   - Additional Non-Modal Commands: G10L1*, G10L10*, G10L11*
-  - Motion Modes: G0, G1, G2, G3, G38.2, G38.3, G38.4, G38.5, G80, G33*
+  - Motion Modes: G0, G1, G2, G3, G5, G38.2, G38.3, G38.4, G38.5, G80, G33*
   - Canned cycles: G73, G81, G82, G83, G85, G86, G89, G98, G99
   - Repetitive cycles: G76*
   - Feed Rate Modes: G93, G94, G95*, G96*, G97*

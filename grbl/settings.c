@@ -56,7 +56,6 @@ const settings_t defaults = {
     .flags.force_initialization_alarm = DEFAULT_FORCE_INITIALIZATION_ALARM,
     .flags.disable_probe_pullup = DISABLE_PROBE_PIN_PULL_UP,
     .flags.allow_probing_feed_override = ALLOW_FEED_OVERRIDE_DURING_PROBE_CYCLES,
-    .flags.force_buffer_sync_on_wco_change = FORCE_BUFFER_SYNC_DURING_WCO_CHANGE,
 
     .steppers.pulse_microseconds = DEFAULT_STEP_PULSE_MICROSECONDS,
     .steppers.pulse_delay_microseconds = DEFAULT_STEP_PULSE_DELAY,
@@ -86,6 +85,8 @@ const settings_t defaults = {
     .status_report.pin_state = REPORT_FIELD_PIN_STATE,
     .status_report.work_coord_offset = REPORT_FIELD_WORK_COORD_OFFSET,
     .status_report.overrides = REPORT_FIELD_OVERRIDES,
+    .status_report.sync_on_wco_change = FORCE_BUFFER_SYNC_DURING_WCO_CHANGE,
+    .status_report.probe_coordinates = REPORT_PROBE_COORDINATES,
 
     .limits.flags.hard_enabled = DEFAULT_HARD_LIMIT_ENABLE,
     .limits.flags.soft_enabled = DEFAULT_SOFT_LIMIT_ENABLE,
@@ -294,15 +295,28 @@ void write_global_settings ()
 
 
 // Restore Grbl global settings to defaults and write to persistent storage
-void settings_restore (settings_restore_t restore) {
+void settings_restore (settings_restore_t restore)
+{
+    uint_fast8_t idx;
+    char empty_line[MAX_STORED_LINE_LENGTH];
+
+    memset(empty_line, 0xFF, MAX_STORED_LINE_LENGTH);
+    *empty_line = '\0';
 
     if (restore.defaults) {
         memcpy(&settings, &defaults, sizeof(settings_t));
+
+        settings.control_invert.block_delete &= hal.driver_cap.block_delete;
+        settings.control_invert.e_stop &= hal.driver_cap.e_stop;
+        settings.control_invert.stop_disable &= hal.driver_cap.program_stop;
+        settings.control_disable_pullup.block_delete &= hal.driver_cap.block_delete;
+        settings.control_disable_pullup.e_stop &= hal.driver_cap.e_stop;
+        settings.control_disable_pullup.stop_disable &= hal.driver_cap.program_stop;
+
         write_global_settings();
     }
 
     if (restore.parameters) {
-        uint_fast8_t idx;
         float coord_data[N_AXIS];
 
         memset(coord_data, 0, sizeof(coord_data));
@@ -321,17 +335,13 @@ void settings_restore (settings_restore_t restore) {
 #endif
     }
 
-    if (hal.eeprom.type != EEPROM_None && restore.startup_lines) {
-      #if N_STARTUP_LINE > 0
-        hal.eeprom.put_byte(EEPROM_ADDR_STARTUP_BLOCK, 0);
-      #endif
-      #if N_STARTUP_LINE > 1
-        hal.eeprom.put_byte(EEPROM_ADDR_STARTUP_BLOCK + (MAX_STORED_LINE_LENGTH + 1), 0);
-      #endif
+    if (restore.startup_lines) {
+        for (idx = 0; idx < N_STARTUP_LINE; idx++)
+            settings_write_startup_line(idx, empty_line);
     }
 
-    if (restore.build_info && hal.eeprom.type != EEPROM_None)
-        hal.eeprom.put_byte(EEPROM_ADDR_BUILD_INFO, 0);
+    if (restore.build_info)
+        settings_write_build_info(empty_line);
 
     if(restore.driver_parameters && hal.driver_settings_restore)
         hal.driver_settings_restore();
@@ -460,10 +470,11 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
                 break;
 
             case Setting_StatusReportMask:
-                settings.status_report.mask = int_value & 0xFF;
 #if COMPATIBILITY_LEVEL <= 1
-                settings.flags.force_buffer_sync_on_wco_change = bit_istrue(int_value, bit(8));
-                settings.flags.report_alarm_substate = bit_istrue(int_value, bit(9));
+                settings.status_report.mask = int_value;
+#else
+                int_value &= 0x03;
+                settings.status_report.mask = (settings.status_report.mask & ~0x03) | int_value;
 #endif
                 break;
 
@@ -485,6 +496,9 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
 
             case Setting_ControlInvertMask:
                 settings.control_invert.mask = int_value;
+                settings.control_invert.block_delete &= hal.driver_cap.block_delete;
+                settings.control_invert.e_stop &= hal.driver_cap.e_stop;
+                settings.control_invert.stop_disable &= hal.driver_cap.program_stop;
                 break;
 
             case Setting_CoolantInvertMask:
@@ -501,6 +515,9 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
 
             case Setting_ControlPullUpDisableMask:
                 settings.control_disable_pullup.mask = int_value & 0x0F;
+                settings.control_disable_pullup.block_delete &= hal.driver_cap.block_delete;
+                settings.control_disable_pullup.e_stop &= hal.driver_cap.e_stop;
+                settings.control_disable_pullup.stop_disable &= hal.driver_cap.program_stop;
                 break;
 
             case Setting_LimitPullUpDisableMask:
@@ -570,6 +587,7 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
                     settings.homing.flags.enabled = On;
 #else
                     settings.homing.flags.value = int_value & 0x0F;
+                    settings.homing.flags.manual = bit_istrue(int_value, bit(5));
                     settings.limits.flags.two_switches = bit_istrue(int_value, bit(4));
 #endif
                 } else {
@@ -659,6 +677,8 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
                         settings.flags.lathe_mode = Off;
                         break;
                 }
+                if(!settings.flags.lathe_mode)
+                    gc_state.modal.diameter_mode = false;
                 break;
 
 #if COMPATIBILITY_LEVEL <= 1
@@ -775,9 +795,8 @@ status_code_t settings_store_global_setting (setting_type_t setting, char *svalu
                 break;
 
             default:;
-                status_code_t status;
-                if(hal.driver_setting && (status = hal.driver_setting(setting, value, svalue)) != Status_OK)
-                    return status == Status_Unhandled ? Status_InvalidStatement : status;
+                status_code_t status = hal.driver_setting ? hal.driver_setting(setting, value, svalue) : Status_Unhandled;
+                return status == Status_Unhandled ? Status_InvalidStatement : status;
         }
     }
 
@@ -811,5 +830,7 @@ void settings_init() {
         mc_backlash_init();
 #endif
         hal.settings_changed(&settings);
+        if(hal.probe_configure_invert_mask) // Initialize probe invert mask.
+            hal.probe_configure_invert_mask(false);
     }
 }

@@ -30,7 +30,6 @@
 
 #include "driver.h"
 #include "esp32-hal-uart.h"
-#include "serial.h"
 #include "nvs.h"
 #include "esp_log.h"
 
@@ -102,7 +101,30 @@ static pwm_ramp_t pwm_ramp;
 driver_settings_t driver_settings;
 #endif
 
+typedef enum {
+    Input_Probe = 0,
+    Input_Reset,
+    Input_FeedHold,
+    Input_CycleStart,
+    Input_SafetyDoor,
+    Input_ModeSelect,
+    Input_LimitX,
+    Input_LimitX_Max,
+    Input_LimitY,
+    Input_LimitY_Max,
+    Input_LimitZ,
+    Input_LimitZ_Max,
+    Input_LimitA,
+    Input_LimitA_Max,
+    Input_LimitB,
+    Input_LimitB_Max,
+    Input_LimitC,
+    Input_LimitC_Max,
+    Input_KeypadStrobe
+} input_t;
+
 typedef struct {
+    input_t id;
     uint8_t pin;
     uint8_t group;
     uint32_t mask;
@@ -111,6 +133,10 @@ typedef struct {
     volatile bool active;
     volatile bool debounce;
 } state_signal_t;
+
+#if MPG_MODE_ENABLE
+static io_stream_t prev_stream = {0};
+#endif
 
 const io_stream_t serial_stream = {
     .type = StreamType_Serial,
@@ -196,33 +222,26 @@ const io_stream_t bluetooth_stream = {
 
 #endif
 
-
-#define INPUT_GROUP_CONTROL 1
-#define INPUT_GROUP_PROBE   2
-#define INPUT_GROUP_LIMIT   4
-#define INPUT_GROUP_KEYPAD  8
-
-#define INPUT_RESET         0
-#define INPUT_FEED_HOLD     1
-#define INPUT_CYCLE_START   2
-#define INPUT_SAFETY_DOOR   3
-#define INPUT_PROBE         4
-#define INPUT_LIMIT_X       5
-#define INPUT_LIMIT_Y       6
-#define INPUT_LIMIT_Z       7
-#define INPUT_KEYPAD        8
+#define INPUT_GROUP_CONTROL (1 << 0)
+#define INPUT_GROUP_PROBE   (1 << 1)
+#define INPUT_GROUP_LIMIT   (1 << 2)
+#define INPUT_GROUP_KEYPAD  (1 << 3)
+#define INPUT_GROUP_MPG     (1 << 4)
 
 state_signal_t inputpin[] = {
-    { .pin = RESET_PIN, .group = INPUT_GROUP_CONTROL },
-    { .pin = FEED_HOLD_PIN, .group = INPUT_GROUP_CONTROL },
-    { .pin = CYCLE_START_PIN, .group = INPUT_GROUP_CONTROL },
-    { .pin = SAFETY_DOOR_PIN, .group = INPUT_GROUP_CONTROL },
-    { .pin = PROBE_PIN, .group = INPUT_GROUP_PROBE },
-    { .pin = X_LIMIT_PIN, .group = INPUT_GROUP_LIMIT },
-    { .pin = Y_LIMIT_PIN, .group = INPUT_GROUP_LIMIT },
-    { .pin = Z_LIMIT_PIN, .group = INPUT_GROUP_LIMIT }
+    { .id = Input_Reset,        .pin = RESET_PIN,       .group = INPUT_GROUP_CONTROL },
+    { .id = Input_FeedHold,     .pin = FEED_HOLD_PIN,   .group = INPUT_GROUP_CONTROL },
+    { .id = Input_CycleStart,   .pin = CYCLE_START_PIN, .group = INPUT_GROUP_CONTROL },
+    { .id = Input_SafetyDoor,   .pin = SAFETY_DOOR_PIN, .group = INPUT_GROUP_CONTROL },
+    { .id = Input_Probe,        .pin = PROBE_PIN,       .group = INPUT_GROUP_PROBE },
+    { .id = Input_LimitX,       .pin = X_LIMIT_PIN,     .group = INPUT_GROUP_LIMIT },
+    { .id = Input_LimitY,       .pin = Y_LIMIT_PIN,     .group = INPUT_GROUP_LIMIT },
+    { .id = Input_LimitZ,       .pin = Z_LIMIT_PIN,     .group = INPUT_GROUP_LIMIT }
+#if MPG_MODE_ENABLE
+  ,  { .id = Input_ModeSelect,  .pin = MPG_ENABLE_PIN,  .group = INPUT_GROUP_MPG }
+#endif
 #if KEYPAD_ENABLE
-  , { .pin = KEYPAD_STROBE_PIN, .group = INPUT_GROUP_KEYPAD }
+  , { .id = Input_KeypadStrobe, .pin = KEYPAD_STROBE_PIN, .group = INPUT_GROUP_KEYPAD }
 #endif
 };
 
@@ -263,7 +282,19 @@ static void stepper_driver_isr (void *arg);
 static void gpio_isr (void *arg);
 
 static TimerHandle_t xDelayTimer = NULL, debounceTimer = NULL;
-static TaskHandle_t xStepperTask = NULL;
+
+static void activateStream (const io_stream_t *stream)
+{
+#if MPG_MODE_ENABLE
+    if(hal.stream.type == StreamType_MPG) {
+        hal.stream.write_all = stream->write_all;
+        if(prev_stream.reset_read_buffer != NULL)
+            prev_stream.reset_read_buffer();
+        memcpy(&prev_stream, stream, sizeof(io_stream_t));
+    } else
+#endif
+        memcpy(&hal.stream, stream, sizeof(io_stream_t));
+}
 
 void selectStream (stream_type_t stream)
 {
@@ -273,14 +304,14 @@ void selectStream (stream_type_t stream)
 
 #if BLUETOOTH_ENABLE
         case StreamType_Bluetooth:
-            memcpy(&hal.stream, &bluetooth_stream, sizeof(io_stream_t));
-            services.bluetooth = On;
+            activateStream(&bluetooth_stream);
+//            services.bluetooth = On;
             break;
 #endif
 
 #if TELNET_ENABLE
         case StreamType_Telnet:
-            memcpy(&hal.stream, &telnet_stream, sizeof(io_stream_t));
+            activateStream(&telnet_stream);
             services.telnet = On;
             hal.stream.write_all("[MSG:TELNET STREAM ACTIVE]\r\n");
             break;
@@ -288,14 +319,14 @@ void selectStream (stream_type_t stream)
 
 #if WEBSOCKET_ENABLE
         case StreamType_WebSocket:
-            memcpy(&hal.stream, &websocket_stream, sizeof(io_stream_t));
+            activateStream(&websocket_stream);
             services.websocket = On;
             hal.stream.write_all("[MSG:WEBSOCKET STREAM ACTIVE]\r\n");
             break;
 #endif
 
         case StreamType_Serial:
-            memcpy(&hal.stream, &serial_stream, sizeof(io_stream_t));
+            activateStream(&serial_stream);
 #if WIFI_ENABLE
             services.mask = 0;
 #endif
@@ -524,10 +555,12 @@ IRAM_ATTR static void stepperPulseStart (stepper_t *stepper)
 // Enable/disable limit pins interrupt
 static void limitsEnable (bool on, bool homing)
 {
-    uint32_t i;
-    for(i = INPUT_LIMIT_X; i <= INPUT_LIMIT_Z; i++) {
-        gpio_set_intr_type(inputpin[i].pin, on ? (inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE) : GPIO_INTR_DISABLE);
-    }
+    uint32_t i = sizeof(inputpin) / sizeof(state_signal_t);
+    do {
+        if(inputpin[--i].group == INPUT_GROUP_LIMIT)
+            gpio_set_intr_type(inputpin[i].pin, on ? (inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE) : GPIO_INTR_DISABLE);
+    } while(i);
+
 #if TRINAMIC_ENABLE
     trinamic_homing(homing);
 #endif
@@ -580,21 +613,26 @@ static void probeConfigure(bool is_probe_away)
     inputpin[INPUT_PROBE].active = false;
 #endif
 }
-
-// Returns the probe pin state. Triggered = true.
-bool probeGetState (void)
+// Returns the probe connected and triggered pin states.
+probe_state_t probeGetState (void)
 {
+    probe_state_t state = {
+        .connected = On
+    };
+
 #if PROBE_ISR
     // TODO: verify!
     inputpin[INPUT_PROBE].active = inputpin[INPUT_PROBE].active || ((uint8_t)gpio_get_level(PROBE_PIN) ^ probe_invert);
-    return inputpin[INPUT_PROBE].active;
+    state.triggered = inputpin[INPUT_PROBE].active;
 #else
-    return (uint8_t)gpio_get_level(PROBE_PIN) ^ probe_invert;
+    state.triggered = (uint8_t)gpio_get_level(PROBE_PIN) ^ probe_invert;
 #endif
+
+    return state;
 }
 
 // Static spindle (off, on cw & on ccw)
-inline static void spindle_off ()
+IRAM_ATTR inline static void spindle_off (void)
 {
 #if IOEXPAND_ENABLE
     iopins.spindle_on = settings.spindle.invert.on ? On : Off;
@@ -604,7 +642,7 @@ inline static void spindle_off ()
 #endif
 }
 
-inline static void spindle_on ()
+IRAM_ATTR inline static void spindle_on (void)
 {
 #if IOEXPAND_ENABLE
     iopins.spindle_on = settings.spindle.invert.on ? Off : On;
@@ -614,20 +652,21 @@ inline static void spindle_on ()
 #endif
 }
 
-inline static void spindle_dir (bool ccw)
+
+IRAM_ATTR inline static void spindle_dir (bool ccw)
 {
     if(hal.driver_cap.spindle_dir) {
 #if IOEXPAND_ENABLE
         iopins.spindle_dir = (ccw ^ settings.spindle.invert.ccw) ? On : Off;
         ioexpand_out(iopins);
-#else
+#elif defined(SPINDLE_DIRECTION_PIN)
         gpio_set_level(SPINDLE_DIRECTION_PIN, (ccw ^ settings.spindle.invert.ccw) ? 1 : 0);
 #endif
     }
 }
 
 // Start or stop spindle
-static void spindleSetState (spindle_state_t state, float rpm)
+IRAM_ATTR static void spindleSetState (spindle_state_t state, float rpm)
 {
     if (!state.on)
         spindle_off();
@@ -688,15 +727,20 @@ IRAM_ATTR static void spindleUpdateRPM (float rpm)
 #endif
 
 // Start or stop spindle, variable version
-static void spindleSetStateVariable (spindle_state_t state, float rpm)
+
+IRAM_ATTR void __attribute__ ((noinline)) _setSpeed (spindle_state_t state, float rpm)
 {
-    if (!state.on || rpm == 0.0f) {
+    spindle_dir(state.ccw);
+    spindle_set_speed(spindle_compute_pwm_value(&spindle_pwm, rpm, false));
+}
+
+IRAM_ATTR static void spindleSetStateVariable (spindle_state_t state, float rpm)
+{
+    if (!state.on || memcmp(&rpm, &FZERO, sizeof(float)) == 0) { // rpm == 0.0f cannot be used, causes intermittent panic on soft reset!
         spindle_set_speed(spindle_pwm.off_value);
         spindle_off();
-    } else {
-        spindle_dir(state.ccw);
-        spindle_set_speed(spindle_compute_pwm_value(&spindle_pwm, rpm, false));
-    }
+    } else
+        _setSpeed(state, rpm);
 }
 
 // Returns spindle state in a spindle_state_t variable
@@ -709,7 +753,9 @@ static spindle_state_t spindleGetState (void)
     state.ccw = hal.driver_cap.spindle_dir && iopins.spindle_dir;
 #else
     state.on = gpio_get_level(SPINDLE_ENABLE_PIN) != 0;
+  #if defined(SPINDLE_DIRECTION_PIN)
     state.ccw = hal.driver_cap.spindle_dir && gpio_get_level(SPINDLE_DIRECTION_PIN) != 0;
+  #endif
 #endif
     state.value ^= settings.spindle.invert.mask;
     state.on |= pwmEnabled;
@@ -723,7 +769,7 @@ static spindle_state_t spindleGetState (void)
 // end spindle code
 
 // Start/stop coolant (and mist if enabled)
-static void coolantSetState (coolant_state_t mode)
+IRAM_ATTR static void coolantSetState (coolant_state_t mode)
 {
     mode.value ^= settings.coolant_invert.mask;
 #if IOEXPAND_ENABLE
@@ -731,8 +777,12 @@ static void coolantSetState (coolant_state_t mode)
     iopins.mist_on = mode.mist;
     ioexpand_out(iopins);
 #else
+  #ifdef COOLANT_FLOOD_PIN
     gpio_set_level(COOLANT_FLOOD_PIN, mode.flood ? 1 : 0);
+  #endif
+  #ifdef COOLANT_MIST_PIN
     gpio_set_level(COOLANT_MIST_PIN, mode.mist ? 1 : 0);
+  #endif
 #endif
 }
 
@@ -745,8 +795,12 @@ static coolant_state_t coolantGetState (void)
     state.flood = iopins.flood_on;
     state.mist = iopins.mist_on;
 #else
+  #ifdef COOLANT_FLOOD_PIN
     state.flood = gpio_get_level(COOLANT_FLOOD_PIN);
+  #endif
+  #ifdef COOLANT_MIST_PIN
     state.mist  = gpio_get_level(COOLANT_MIST_PIN);
+  #endif
 #endif
 
     state.value ^= settings.coolant_invert.mask;
@@ -786,6 +840,52 @@ IRAM_ATTR static uint_fast16_t valueSetAtomic (volatile uint_fast16_t *ptr, uint
     portEXIT_CRITICAL(&mux);
     return prev;
 }
+
+#if MPG_MODE_ENABLE
+
+IRAM_ATTR static void modeSelect (bool mpg_mode)
+{
+    // Deny entering MPG mode if busy
+    if(mpg_mode == sys.mpg_mode || (mpg_mode && (gc_state.file_run || !(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP)))))) {
+        hal.stream.enqueue_realtime_command(CMD_STATUS_REPORT_ALL);
+        return;
+    }
+
+    serialSelect(mpg_mode);
+
+    if(mpg_mode) {
+        memcpy(&prev_stream, &hal.stream, sizeof(io_stream_t));
+        hal.stream.type = StreamType_MPG;
+        hal.stream.read = uart2Read;
+        hal.stream.write = serial_stream.write;
+        hal.stream.get_rx_buffer_available = uart2RXFree;
+        hal.stream.reset_read_buffer = uart2Flush;
+        hal.stream.cancel_read_buffer = uart2Cancel;
+        hal.stream.suspend_read = uart2SuspendInput;
+    } else if(hal.stream.read != NULL)
+        memcpy(&hal.stream, &prev_stream, sizeof(io_stream_t));
+
+    hal.stream.reset_read_buffer();
+
+    sys.mpg_mode = mpg_mode;
+    sys.report.mpg_mode = On;
+
+    // Force a realtime status report, all reports when MPG mode active
+    hal.stream.enqueue_realtime_command(mpg_mode ? CMD_STATUS_REPORT_ALL : CMD_STATUS_REPORT);
+}
+
+IRAM_ATTR static void modeChange(void)
+{
+    modeSelect(!gpio_get_level(MPG_ENABLE_PIN));
+}
+
+IRAM_ATTR static void modeEnable (void)
+{
+    if(sys.mpg_mode == gpio_get_level(MPG_ENABLE_PIN))
+        modeSelect(true);
+}
+
+#endif
 
 void debounceTimerCallback (TimerHandle_t xTimer)
 {
@@ -898,59 +998,68 @@ static void settings_changed (settings_t *settings)
 
             config.intr_type = GPIO_INTR_DISABLE;
 
-            switch(--i) {
+            switch(inputpin[--i].id) {
 
-                case INPUT_RESET:
+                case Input_Reset:
                     pullup = !settings->control_disable_pullup.reset;
                     inputpin[i].invert = control_fei.reset;
                     config.intr_type = inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE;
                     break;
 
-                case INPUT_FEED_HOLD:
+                case Input_FeedHold:
                     pullup = !settings->control_disable_pullup.feed_hold;
                     inputpin[i].invert = control_fei.feed_hold;
                     config.intr_type = inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE;
                     break;
 
-                case INPUT_CYCLE_START:
+                case Input_CycleStart:
                     pullup = !settings->control_disable_pullup.cycle_start;
                     inputpin[i].invert = control_fei.cycle_start;
                     config.intr_type = inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE;
                     break;
 
-                case INPUT_SAFETY_DOOR:
+                case Input_SafetyDoor:
                     pullup = !settings->control_disable_pullup.safety_door_ajar;
                     inputpin[i].invert = control_fei.safety_door_ajar;
                     config.intr_type = inputpin[i].invert ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE;
                     break;
 
-                case INPUT_PROBE:
+                case Input_Probe:
                     pullup = hal.driver_cap.probe_pull_up;
                     inputpin[i].invert = false;
                     break;
 
-                case INPUT_LIMIT_X:
+                case Input_LimitX:
                     pullup = !settings->limits.disable_pullup.x;
                     inputpin[i].invert = limit_fei.x;
                     break;
 
-                case INPUT_LIMIT_Y:
+                case Input_LimitY:
                     pullup = !settings->limits.disable_pullup.y;
                     inputpin[i].invert = limit_fei.y;
                     break;
 
-                case INPUT_LIMIT_Z:
+                case Input_LimitZ:
                     pullup = !settings->limits.disable_pullup.z;
                     inputpin[i].invert = limit_fei.z;
                     break;
-
-#if KEYPAD_ENABLE
-                case INPUT_KEYPAD:
+#if MPG_MODE_ENABLE
+                case Input_ModeSelect:
                     pullup = true;
                     inputpin[i].invert = false;
                     config.intr_type = GPIO_INTR_ANYEDGE;
                     break;
 #endif
+#if KEYPAD_ENABLE
+                case Input_KeypadStrobe:
+                    pullup = true;
+                    inputpin[i].invert = false;
+                    config.intr_type = GPIO_INTR_ANYEDGE;
+                    break;
+#endif
+                default:
+                    break;
+
             }
 
             if(inputpin[i].pin != 0xFF) {
@@ -971,26 +1080,46 @@ static void settings_changed (settings_t *settings)
                 gpio_config(&config);
 
                 inputpin[i].active   = gpio_get_level(inputpin[i].pin) == (inputpin[i].invert ? 0 : 1);
-                inputpin[i].debounce = hal.driver_cap.software_debounce && !(inputpin[i].group == INPUT_GROUP_PROBE || inputpin[i].group == INPUT_GROUP_KEYPAD);
+                inputpin[i].debounce = hal.driver_cap.software_debounce && !(inputpin[i].group == INPUT_GROUP_PROBE || inputpin[i].group == INPUT_GROUP_KEYPAD || inputpin[i].group == INPUT_GROUP_MPG);
             }
         } while(i);
-    }
-}
 
-void vStepperTask (void *pvParameters)
-{
-    while(true) {
-        vTaskSuspend(NULL);
-        hal.stepper_interrupt_callback();
+#if MPG_MODE_ENABLE
+        if(hal.driver_cap.mpg_mode)
+            // Delay mode enable a bit so grbl can finish startup and MPG controller can check ready status
+            hal.delay_ms(50, modeEnable);
+#endif
+
     }
 }
 
 #if WIFI_ENABLE
 static void reportIP (void)
 {
+    hal.stream.write("[WIFI MAC:");
+    hal.stream.write(wifi_get_mac());
+    hal.stream.write("]"  ASCII_EOL);
+
     hal.stream.write("[IP:");
     hal.stream.write(wifi_get_ip());
-    hal.stream.write("]\r\n");
+    hal.stream.write("]"  ASCII_EOL);
+}
+#endif
+
+#if BLUETOOTH_ENABLE
+static void report_bt_MAC (void)
+{
+    char *client_mac;
+
+    hal.stream.write("[BT DEVICE MAC:");
+    hal.stream.write(bluetooth_get_device_mac());
+    hal.stream.write("]" ASCII_EOL);
+
+    if((client_mac = bluetooth_get_client_mac())) {
+        hal.stream.write("[BT CLIENT MAC:");
+        hal.stream.write(client_mac);
+        hal.stream.write("]" ASCII_EOL);
+    }
 }
 #endif
 
@@ -1029,8 +1158,6 @@ static bool driver_setup (settings_t *settings)
     timer_isr_register(STEP_TIMER_GROUP, STEP_TIMER_INDEX, stepper_driver_isr, 0, ESP_INTR_FLAG_IRAM, NULL);
     timer_enable_intr(STEP_TIMER_GROUP, STEP_TIMER_INDEX);
 
-    xTaskCreatePinnedToCore(vStepperTask, "Stepper", configMINIMAL_STACK_SIZE, NULL, configMAX_PRIORITIES, &xStepperTask, 1);
-
     /********************
      *  Output signals  *
      ********************/
@@ -1043,7 +1170,11 @@ static bool driver_setup (settings_t *settings)
 #if IOEXPAND_ENABLE
         .pin_bit_mask = DIRECTION_MASK,
 #else
+  #ifdef COOLANT_MASK
         .pin_bit_mask = DIRECTION_MASK|STEPPERS_DISABLE_MASK|SPINDLE_MASK|COOLANT_MASK,
+  #else
+        .pin_bit_mask = DIRECTION_MASK|STEPPERS_DISABLE_MASK|SPINDLE_MASK,
+  #endif
 #endif
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
@@ -1052,6 +1183,20 @@ static bool driver_setup (settings_t *settings)
     };
 
     gpio_config(&gpioConfig);
+
+#if MPG_MODE_ENABLE
+
+    /************************
+     *  MPG mode (pre)init  *
+     ************************/
+
+    // Set as output low (until boot is complete)
+    gpioConfig.pin_bit_mask = (1ULL << MPG_ENABLE_PIN);
+    gpio_config(&gpioConfig);
+    gpio_set_level(MPG_ENABLE_PIN, 0);
+
+    uart2Init();
+#endif
 
    /****************************
     *  Software debounce init  *
@@ -1120,7 +1265,7 @@ static bool driver_setup (settings_t *settings)
 
   // Set defaults
 
-    IOInitDone = settings->version == 15;
+    IOInitDone = settings->version == 16;
 
     settings_changed(settings);
 
@@ -1169,7 +1314,7 @@ static void driver_settings_report (setting_type_t setting)
 #endif
 
 #if BLUETOOTH_ENABLE
-    bluetooth_settings_report();
+    bluetooth_settings_report(setting);
 #endif
 
 #if WIFI_ENABLE
@@ -1219,6 +1364,10 @@ bool driver_init (void)
 #endif
 
     hal.info = "ESP32";
+    hal.driver_version = "200528";
+#ifdef BOARD_NAME
+    hal.board = BOARD_NAME;
+#endif
     hal.driver_setup = driver_setup;
     hal.f_step_timer = rtc_clk_apb_freq_get() / STEPPER_DRIVER_PRESCALER; // 20 MHz
     hal.rx_buffer_size = RX_BUFFER_SIZE;
@@ -1310,22 +1459,35 @@ bool driver_init (void)
 #if WIFI_ENABLE
     hal.report_options = reportIP;
 #endif
+#if BLUETOOTH_ENABLE
+    hal.report_options = report_bt_MAC;
+#endif
 
   // driver capabilities, used for announcing and negotiating (with Grbl) driver functionality
 
+#if IOEXPAND_ENABLE || defined(SPINDLE_DIRECTION_PIN)
     hal.driver_cap.spindle_dir = On;
+#endif
     hal.driver_cap.variable_spindle = On;
     hal.driver_cap.spindle_pwm_invert = On;
 #if PWM_RAMPED
     hal.driver_cap.spindle_at_speed = On;
 #endif
+#if IOEXPAND_ENABLE || defined(COOLANT_MIST_PIN)
     hal.driver_cap.mist_control = On;
+#endif
     hal.driver_cap.software_debounce = On;
     hal.driver_cap.step_pulse_delay = On;
     hal.driver_cap.amass_level = 3;
     hal.driver_cap.control_pull_up = On;
     hal.driver_cap.limits_pull_up = On;
     hal.driver_cap.probe_pull_up = On;
+#ifdef SAFETY_DOOR_PIN
+    hal.driver_cap.safety_door = On;
+#endif
+#if MPG_MODE_ENABLE
+    hal.driver_cap.mpg_mode = On;
+#endif
 #if SDCARD_ENABLE
     hal.driver_cap.sd_card = On;
 #endif
@@ -1345,27 +1507,10 @@ bool driver_init (void)
 // Main stepper driver
 IRAM_ATTR static void stepper_driver_isr (void *arg)
 {
-//  const int timer_idx = (int)arg;  // get the timer index
-
     TIMERG0.int_clr_timers.t0 = 1;
     TIMERG0.hw_timer[STEP_TIMER_INDEX].config.alarm_en = TIMER_ALARM_EN;
 
-    /* Resume the suspended task. */
-
-    /* A context switch should now be performed so the ISR returns directly to
-    the resumed task. This is because the resumed task had a priority that
-    was equal to or higher than the task that is currently in the Running state.
-    NOTE: The syntax required to perform a context switch from an ISR varies
-    from port to port and from compiler to compiler. Check the
-    documentation and examples for the port being used to find the syntax required by your
-    application. It is likely that this if() statement can be replaced by a
-    single call to portYIELD_FROM_ISR() [or portEND_SWITCHING_ISR()]
-    using xYieldRequired as the macro parameter: portYIELD_FROM_ISR( xYieldRequired );*/
-
     hal.stepper_interrupt_callback();
-
-//    if(xTaskResumeFromISR(xStepperTask) == pdTRUE)
-//         portYIELD_FROM_ISR();
 }
 
   //GPIO intr process
@@ -1402,8 +1547,20 @@ IRAM_ATTR static void gpio_isr (void *arg)
   if(grp & INPUT_GROUP_CONTROL)
       hal.control_interrupt_callback(systemGetState());
 
+#if MPG_MODE_ENABLE
+
+  static bool mpg_mutex = false;
+
+  if((grp & INPUT_GROUP_MPG) && !mpg_mutex) {
+      mpg_mutex = true;
+      modeChange();
+     // hal.delay_ms(50, modeChange); // causes intermittent panic... stacked calls due to debounce?
+      mpg_mutex = false;
+  }
+#endif
+
 #if KEYPAD_ENABLE
   if(grp & INPUT_GROUP_KEYPAD)
-      keypad_keyclick_handler(gpio_get_level(inputpin[INPUT_KEYPAD].pin));
+      keypad_keyclick_handler(gpio_get_level(KEYPAD_STROBE_PIN));
 #endif
 }

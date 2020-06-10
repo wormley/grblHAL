@@ -3,7 +3,7 @@
 
   Part of Grbl
 
-  Copyright (c) 2019 Terje Io
+  Copyright (c) 2019-2020 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -44,10 +44,19 @@
 #define TX_BUFFER_SIZE 512  // must be a power of 2
 #endif
 
+#ifndef BLOCK_TX_BUFFER_SIZE
+#define BLOCK_TX_BUFFER_SIZE 200
+#endif
+
 #define BUFCOUNT(head, tail, size) ((head >= tail) ? (head - tail) : (size - tail + head))
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 typedef enum {
     StreamType_Serial = 0,
+    StreamType_MPG,
     StreamType_Bluetooth,
     StreamType_Telnet,
     StreamType_WebSocket,
@@ -75,5 +84,12 @@ typedef struct {
     volatile uint_fast16_t tail;
     char data[TX_BUFFER_SIZE];
 } stream_tx_buffer_t;
+
+typedef struct {
+    uint_fast16_t length;
+    uint_fast16_t max_length;
+    char *s;
+    char data[BLOCK_TX_BUFFER_SIZE];
+} stream_block_tx_buffer_t;
 
 #endif

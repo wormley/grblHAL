@@ -32,6 +32,8 @@
 #include "stepper.h"
 #include "eeprom.h"
 #include "stream.h"
+#include "probe.h"
+#include "plugins.h"
 
 #define HAL_VERSION 6
 
@@ -50,6 +52,8 @@ typedef union {
                  probe_pull_up             :1,
                  amass_level               :2, // 0...3
                  program_stop              :1,
+                 block_delete              :1,
+                 e_stop                    :1,
                  spindle_at_speed          :1,
                  laser_ppi_mode            :1,
                  spindle_sync              :1,
@@ -64,7 +68,8 @@ typedef union {
                  axis_ganged_z             :1,
                  mpg_mode                  :1,
                  spindle_pwm_linearization :1,
-                 unassigned                :6;
+                 probe_connected           :1,
+                 unassigned                :3;
     };
 } driver_cap_t;
 
@@ -74,9 +79,9 @@ typedef void (*driver_reset_ptr)(void);
 
 /* TODO: add to HAL so that a different formatting (xml, json etc) of reports may be implemented by driver? */
 typedef struct {
-	status_code_t (*report_status_message)(status_code_t status_code);
-	alarm_code_t (*report_alarm_message)(alarm_code_t alarm_code);
-	message_code_t (*report_feedback_message)(message_code_t message_code);
+    status_code_t (*report_status_message)(status_code_t status_code);
+    alarm_code_t (*report_alarm_message)(alarm_code_t alarm_code);
+    message_code_t (*report_feedback_message)(message_code_t message_code);
     void (*report_init_message)(void);
     void (*report_grbl_help)(void);
     void (*report_grbl_settings)(void);
@@ -90,8 +95,8 @@ typedef struct {
 } HAL_report_t;
 
 typedef struct {
-	status_code_t (*status_message)(status_code_t status_code);
-	message_code_t (*feedback_message)(message_code_t message_code);
+    status_code_t (*status_message)(status_code_t status_code);
+    message_code_t (*feedback_message)(message_code_t message_code);
 } report_t;
 
 typedef struct {
@@ -118,6 +123,9 @@ typedef struct {
 typedef struct HAL {
     uint32_t version;
     char *info;
+    char *driver_version;
+    char *driver_options;
+    char *board;
     uint32_t f_step_timer;
     uint32_t rx_buffer_size;
 
@@ -156,7 +164,7 @@ typedef struct HAL {
 
     // optional entry points, may be unassigned (null)
     bool (*driver_release)(void);
-    bool (*probe_get_state)(void);
+    probe_state_t (*probe_get_state)(void);
     void (*probe_configure_invert_mask)(bool is_probe_away);
     void (*execute_realtime)(uint_fast16_t state);
     user_mcode_t (*user_mcode_check)(user_mcode_t mcode);
@@ -180,6 +188,7 @@ typedef struct HAL {
     spindle_data_t (*spindle_get_data)(spindle_data_request_t request);
     void (*spindle_reset_data)(void);
     void (*state_change_requested)(uint_fast16_t state);
+    void (*encoder_state_changed)(encoder_t *encoder);
 #ifdef DEBUGOUT
     void (*debug_out)(bool on);
 #endif

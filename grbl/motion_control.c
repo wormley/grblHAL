@@ -2,11 +2,13 @@
   motion_control.c - high level interface for issuing motion commands
   Part of Grbl
 
-  Copyright (c) 2017-2019 Terje Io
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
   Backlash compensation code based on code copyright (c) 2017 Patrick F. (Schildkroet)
+
+  Bezier splines based on a pull request for Marlin by Giovanni Mascellani
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -286,6 +288,174 @@ void mc_arc (float *target, plan_line_data_t *pl_data, float *position, float *o
     mc_line(target, pl_data);
 }
 
+// Bezier splines, from a pull request for Marlin
+// By Giovanni Mascellani - https://github.com/giomasce/Marlin
+
+// Compute the linear interpolation between two real numbers.
+static inline float interp(const float a, const float b, const float t)
+{
+    return (1.0f - t) * a + t * b;
+}
+
+/**
+ * Compute a Bézier curve using the De Casteljau's algorithm (see
+ * https://en.wikipedia.org/wiki/De_Casteljau's_algorithm), which is
+ * easy to code and has good numerical stability (very important,
+ * since Arudino works with limited precision real numbers).
+ */
+static inline float eval_bezier(const float a, const float b, const float c, const float d, const float t)
+{
+    const float iab = interp(a, b, t),
+                ibc = interp(b, c, t),
+                icd = interp(c, d, t),
+                iabc = interp(iab, ibc, t),
+                ibcd = interp(ibc, icd, t);
+
+    return interp(iabc, ibcd, t);
+}
+
+/**
+ * We approximate Euclidean distance with the sum of the coordinates
+ * offset (so-called "norm 1"), which is quicker to compute.
+ */
+static inline float dist1(const float x1, const float y1, const float x2, const float y2)
+{
+    return fabsf(x1 - x2) + fabsf(y1 - y2);
+}
+
+/**
+ * The algorithm for computing the step is loosely based on the one in Kig
+ * (See https://sources.debian.net/src/kig/4:15.08.3-1/misc/kigpainter.cpp/#L759)
+ * However, we do not use the stack.
+ *
+ * The algorithm goes as it follows: the parameters t runs from 0.0 to
+ * 1.0 describing the curve, which is evaluated by eval_bezier(). At
+ * each iteration we have to choose a step, i.e., the increment of the
+ * t variable. By default the step of the previous iteration is taken,
+ * and then it is enlarged or reduced depending on how straight the
+ * curve locally is. The step is always clamped between MIN_STEP/2 and
+ * 2*MAX_STEP. MAX_STEP is taken at the first iteration.
+ *
+ * For some t, the step value is considered acceptable if the curve in
+ * the interval [t, t+step] is sufficiently straight, i.e.,
+ * sufficiently close to linear interpolation. In practice the
+ * following test is performed: the distance between eval_bezier(...,
+ * t+step/2) is evaluated and compared with 0.5*(eval_bezier(...,
+ * t)+eval_bezier(..., t+step)). If it is smaller than SIGMA, then the
+ * step value is considered acceptable, otherwise it is not. The code
+ * seeks to find the larger step value which is considered acceptable.
+ *
+ * At every iteration the recorded step value is considered and then
+ * iteratively halved until it becomes acceptable. If it was already
+ * acceptable in the beginning (i.e., no halving were done), then
+ * maybe it was necessary to enlarge it; then it is iteratively
+ * doubled while it remains acceptable. The last acceptable value
+ * found is taken, provided that it is between MIN_STEP and MAX_STEP
+ * and does not bring t over 1.0.
+ *
+ * Caveat: this algorithm is not perfect, since it can happen that a
+ * step is considered acceptable even when the curve is not linear at
+ * all in the interval [t, t+step] (but its mid point coincides "by
+ * chance" with the midpoint according to the parametrization). This
+ * kind of glitches can be eliminated with proper first derivative
+ * estimates; however, given the improbability of such configurations,
+ * the mitigation offered by MIN_STEP and the small computational
+ * power available on Arduino, I think it is not wise to implement it.
+ */
+
+void mc_cubic_b_spline (float *target, plan_line_data_t *pl_data, float *position, float *offset1, float *offset2)
+{
+    // Absolute first and second control points are recovered.
+
+    float first[2] = { position[X_AXIS] + offset1[X_AXIS], position[Y_AXIS] + offset1[Y_AXIS] };
+    float second[2] = { target[X_AXIS] + offset2[X_AXIS], target[Y_AXIS] + offset2[Y_AXIS] };
+    float bez_target[N_AXIS];
+
+    memcpy(bez_target, position, sizeof(float) * N_AXIS);
+
+    float t = 0.0f, step = BEZIER_MAX_STEP;
+
+    while (t < 1.0f) {
+
+        // First try to reduce the step in order to make it sufficiently
+        // close to a linear interpolation.
+        bool did_reduce = false;
+        float new_t = t + step;
+
+        if(new_t > 1.0f)
+            new_t = 1.0f;
+
+        float new_pos0 = eval_bezier(position[X_AXIS], first[X_AXIS], second[X_AXIS], target[X_AXIS], new_t),
+              new_pos1 = eval_bezier(position[Y_AXIS], first[Y_AXIS], second[Y_AXIS], target[Y_AXIS], new_t);
+
+        while(new_t - t >= (BEZIER_MIN_STEP)) {
+
+//            if (new_t - t < (BEZIER_MIN_STEP))
+//                break;
+
+            const float candidate_t = 0.5f * (t + new_t),
+                      candidate_pos0 = eval_bezier(position[X_AXIS], first[X_AXIS], second[X_AXIS], target[X_AXIS], candidate_t),
+                      candidate_pos1 = eval_bezier(position[Y_AXIS], first[Y_AXIS], second[Y_AXIS], target[Y_AXIS], candidate_t),
+                      interp_pos0 = 0.5f * (bez_target[X_AXIS] + new_pos0),
+                      interp_pos1 = 0.5f * (bez_target[Y_AXIS] + new_pos1);
+
+            if (dist1(candidate_pos0, candidate_pos1, interp_pos0, interp_pos1) <= (BEZIER_SIGMA))
+                break;
+
+            new_t = candidate_t;
+            new_pos0 = candidate_pos0;
+            new_pos1 = candidate_pos1;
+            did_reduce = true;
+        }
+
+        // If we did not reduce the step, maybe we should enlarge it.
+        if (!did_reduce) while (new_t - t <= BEZIER_MAX_STEP) {
+
+//            if (new_t - t > BEZIER_MAX_STEP)
+//                break;
+
+            const float candidate_t = t + 2.0f * (new_t - t);
+
+            if (candidate_t >= 1.0f)
+                break;
+
+            const float candidate_pos0 = eval_bezier(position[X_AXIS], first[X_AXIS], second[X_AXIS], target[X_AXIS], candidate_t),
+                      candidate_pos1 = eval_bezier(position[Y_AXIS], first[Y_AXIS], second[Y_AXIS], target[Y_AXIS], candidate_t),
+                      interp_pos0 = 0.5f * (bez_target[X_AXIS] + candidate_pos0),
+                      interp_pos1 = 0.5f * (bez_target[Y_AXIS] + candidate_pos1);
+
+            if (dist1(new_pos0, new_pos1, interp_pos0, interp_pos1) > (BEZIER_SIGMA))
+                break;
+
+            new_t = candidate_t;
+            new_pos0 = candidate_pos0;
+            new_pos1 = candidate_pos1;
+        }
+
+        // Check some postcondition; they are disabled in the actual
+        // Marlin build, but if you test the same code on a computer you
+        // may want to check they are respect.
+        /*
+          assert(new_t <= 1.0);
+          if (new_t < 1.0) {
+            assert(new_t - t >= (MIN_STEP) / 2.0);
+            assert(new_t - t <= (MAX_STEP) * 2.0);
+          }
+        */
+
+        step = new_t - t;
+        t = new_t;
+
+        bez_target[X_AXIS] = new_pos0;
+        bez_target[Y_AXIS] = new_pos1;
+
+        // Bail mid-spline on system abort. Runtime command check already performed by mc_line.
+        if(!mc_line(bez_target, pl_data))
+            return;
+    }
+}
+
+// end Bezier splines
 
 void mc_canned_drill (motion_mode_t motion, float *target, plan_line_data_t *pl_data, float *position, plane_t plane, uint32_t repeats, gc_canned_t *canned)
 {
@@ -395,10 +565,10 @@ void mc_thread (plan_line_data_t *pl_data, float *position, gc_thread_data *thre
 {
     uint_fast16_t pass = 1, passes = 0;
     float doc = thread->initial_depth, inv_degression = 1.0f / thread->depth_degression, thread_length;
-    float end_taper_length, end_taper_depth;
-    float end_taper_factor = thread->end_taper_type == Taper_None ? 0.0f : (thread->end_taper_type == Taper_Both ? 2.0f : 1.0f);
+    float entry_taper_length = thread->end_taper_type & Taper_Entry ? thread->end_taper_length : 0.0f;
+    float exit_taper_length = thread->end_taper_type & Taper_Exit ? thread->end_taper_length : 0.0f;
     float infeed_factor = tanf(thread->infeed_angle * RADDEG);
-    float target[N_AXIS];
+    float target[N_AXIS], start_z = position[Z_AXIS] + thread->depth * infeed_factor;
 
     memcpy(target, position, sizeof(float) * N_AXIS);
 
@@ -407,13 +577,17 @@ void mc_thread (plan_line_data_t *pl_data, float *position, gc_thread_data *thre
 
     passes += thread->spring_passes + 1;
 
-    if((thread_length = thread->z_final - position[Z_AXIS]) > 0.0f)
-        thread->end_taper_length = -thread->end_taper_length;
+    if((thread_length = thread->z_final - position[Z_AXIS]) > 0.0f) {
+        if(thread->end_taper_type & Taper_Entry)
+            entry_taper_length = -entry_taper_length;
+        if(thread->end_taper_type & Taper_Exit)
+            exit_taper_length = - exit_taper_length;
+    }
 
-    thread_length += thread->end_taper_length * end_taper_factor;
+    thread_length += entry_taper_length + exit_taper_length;
 
     if(thread->main_taper_height != 0.0f)
-        thread->main_taper_height = thread->main_taper_height * thread_length / (thread_length - thread->end_taper_length * end_taper_factor);
+        thread->main_taper_height = thread->main_taper_height * thread_length / (thread_length - (entry_taper_length + exit_taper_length));
 
     pl_data->condition.rapid_motion = On; // Set rapid motion condition flag.
 
@@ -425,57 +599,49 @@ void mc_thread (plan_line_data_t *pl_data, float *position, gc_thread_data *thre
 
     // Initial Z-move for compound slide angle offset.
     if(infeed_factor != 0.0f) {
-        target[Z_AXIS] += thread->depth * infeed_factor;
+        target[Z_AXIS] = start_z - doc * infeed_factor;
         if(!mc_line(target, pl_data))
             return;
     }
 
     while(--passes) {
 
-        end_taper_factor = doc / thread->depth;
-        end_taper_depth = thread->depth * end_taper_factor;
-        end_taper_length = thread->end_taper_length * end_taper_factor;
+        if(thread->end_taper_type & Taper_Entry)
+            target[X_AXIS] = position[X_AXIS] + (thread->peak + doc - thread->depth) * thread->cut_direction;
+        else
+            target[X_AXIS] = position[X_AXIS] + (thread->peak + doc) * thread->cut_direction;
 
-        if(thread->end_taper_type == Taper_None) {
-            target[X_AXIS] += (thread->peak + doc) * thread->cut_direction;
-            if(!mc_line(target, pl_data))
-                return;
-        }
+        if(!mc_line(target, pl_data))
+            return;
+
+        if(!protocol_buffer_synchronize() && sys.state != STATE_IDLE) // Wait until any previous moves are finished.
+            return;
 
         pl_data->condition.rapid_motion = Off;          // Clear rapid motion condition flag,
         pl_data->condition.spindle.synchronized = On;   // enable spindle sync for cut
         pl_data->overrides.feed_hold_disable = On;      // and disable feed hold
 
-        mc_dwell(0.01f); // Needed for now since initial spindle sync is done just before st_wake_up
-
         // Cut thread pass
 
         // 1. Entry taper
-        if(thread->end_taper_type == Taper_Entry || thread->end_taper_type == Taper_Both) {
+        if(thread->end_taper_type & Taper_Entry) {
 
-            // TODO: move this segment outside of synced motion?
-            target[X_AXIS] += (thread->peak + doc - end_taper_depth) * thread->cut_direction;
-            if(!mc_line(target, pl_data))
-                return;
-
-            target[X_AXIS] += end_taper_depth * thread->cut_direction;
-            target[Z_AXIS] -= end_taper_length;
+            target[X_AXIS] += thread->depth * thread->cut_direction;
+            target[Z_AXIS] -= entry_taper_length;
             if(!mc_line(target, pl_data))
                 return;
         }
 
         // 2. Main part
-        if(thread_length != 0.0f) {
-            target[X_AXIS] += thread->main_taper_height * thread->cut_direction;
-            target[Z_AXIS] += thread_length;
-            if(!mc_line(target, pl_data))
-                return;
-        }
+        target[Z_AXIS] += thread_length;
+        if(!mc_line(target, pl_data))
+            return;
 
         // 3. Exit taper
-        if(thread->end_taper_type == Taper_Exit || thread->end_taper_type == Taper_Both) {
-            target[X_AXIS] += end_taper_depth * thread->cut_direction;
-            target[Z_AXIS] -= end_taper_length;
+        if(thread->end_taper_type & Taper_Exit) {
+
+            target[X_AXIS] -= thread->depth * thread->cut_direction;
+            target[Z_AXIS] -= exit_taper_length;
             if(!mc_line(target, pl_data))
                 return;
         }
@@ -483,26 +649,32 @@ void mc_thread (plan_line_data_t *pl_data, float *position, gc_thread_data *thre
         pl_data->condition.rapid_motion = On;           // Set rapid motion condition flag and
         pl_data->condition.spindle.synchronized = Off;  // disable spindle sync for retract & reposition
 
-        // 4. Retract
-        target[X_AXIS] = position[X_AXIS];
-        if(!mc_line(target, pl_data))
-            return;
-
         if(passes > 1) {
 
             // Get DOC of next pass.
             doc = calc_thread_doc(++pass, thread->initial_depth, inv_degression);
             doc = min(doc, thread->depth);
 
+            // 4. Retract
+            target[X_AXIS] = position[X_AXIS] + (doc - thread->depth) * thread->cut_direction;
+            if(!mc_line(target, pl_data))
+                return;
+
             // Restore disable feed hold status for reposition move.
             pl_data->overrides.feed_hold_disable = feed_hold_disabled;
 
             // 5. Back to start, add compound slide angle offset when commanded.
-            target[Z_AXIS] = position[Z_AXIS] + (infeed_factor != 0.0f ? (thread->depth - doc) * infeed_factor : 0.0f);
+            target[Z_AXIS] = start_z - (infeed_factor != 0.0f ? doc * infeed_factor : 0.0f);
             if(!mc_line(target, pl_data))
                 return;
-        } else
+
+        } else {
+
             doc = thread->depth;
+            target[X_AXIS] = position[X_AXIS];
+            if(!mc_line(target, pl_data))
+                return;
+        }
     }
 }
 
@@ -547,49 +719,85 @@ void mc_dwell (float seconds)
 // executing the homing cycle. This prevents incorrect buffered plans after homing.
 status_code_t mc_homing_cycle (axes_signals_t cycle)
 {
-    // Check and abort homing cycle, if hard limits are already enabled. Helps prevent problems
-    // with machines with limits wired on both ends of travel to one limit pin.
-    // TODO: Move the pin-specific LIMIT_PIN call to limits.c as a function.
-    if (settings.limits.flags.two_switches && hal.limits_get_state().value) {
-        mc_reset(); // Issue system reset and ensure spindle and coolant are shutdown.
-        system_set_exec_alarm(Alarm_HardLimit);
-        return Status_Unhandled;
-    }
+    bool home_all = cycle.mask == 0;
 
-    hal.limits_enable(false, true); // Disable hard limits pin change register for cycle duration
+    if(settings.homing.flags.manual && (home_all ? sys.homing.mask : (cycle.mask & sys.homing.mask)) == 0) {
 
-    // Turn off spindle and coolant (and update parser state)
-    gc_state.spindle.rpm = 0.0f;
-    gc_state.modal.spindle.on = gc_state.modal.spindle.ccw = Off;
-    spindle_set_state(gc_state.modal.spindle, 0.0f);
+        if(home_all)
+            cycle.mask = AXES_BITMASK;
 
-    gc_state.modal.coolant.mask = 0;
-    coolant_set_state(gc_state.modal.coolant);
+        sys.homed.mask |= cycle.mask;
+#ifdef KINEMATICS_API
+        kinematics.limits_set_machine_positions(cycle);
+#else
+        limits_set_machine_positions(cycle, false);
+#endif
+    } else {
 
-    // -------------------------------------------------------------------------------------
-    // Perform homing routine. NOTE: Special motion case. Only system reset works.
+        // Check and abort homing cycle, if hard limits are already enabled. Helps prevent problems
+        // with machines with limits wired on both ends of travel to one limit pin.
+        // TODO: Move the pin-specific LIMIT_PIN call to limits.c as a function.
+        if (settings.limits.flags.two_switches && hal.limits_get_state().value) {
+            mc_reset(); // Issue system reset and ensure spindle and coolant are shutdown.
+            system_set_exec_alarm(Alarm_HardLimit);
+            return Status_Unhandled;
+        }
 
-    if (cycle.mask) // Perform homing cycle based on mask.
-        limits_go_home(cycle);
-    else {
+        set_state(STATE_HOMING);                                // Set homing system state,
+        hal.stream.enqueue_realtime_command(CMD_STATUS_REPORT); // force a status report and
+        delay_sec(0.1f, DelayMode_Dwell);                       // delay a bit to get it sent (or perhaps wait a bit for a request?)
 
-        uint_fast8_t idx = 0;
+        hal.limits_enable(false, true); // Disable hard limits pin change register for cycle duration
 
-        sys.homed.mask = 0;
+        // Turn off spindle and coolant (and update parser state)
+        gc_state.spindle.rpm = 0.0f;
+        gc_state.modal.spindle.on = gc_state.modal.spindle.ccw = Off;
+        spindle_set_state(gc_state.modal.spindle, 0.0f);
 
-        do {
-            if(settings.homing.cycle[idx].mask) {
-                cycle.mask = settings.homing.cycle[idx].mask;
-                if(!limits_go_home(cycle))
-                    break;
-            }
-        } while(++idx < N_AXIS);
+        gc_state.modal.coolant.mask = 0;
+        coolant_set_state(gc_state.modal.coolant);
+
+        // -------------------------------------------------------------------------------------
+        // Perform homing routine. NOTE: Special motion case. Only system reset works.
+
+        if (!home_all) // Perform homing cycle based on mask.
+            limits_go_home(cycle);
+        else {
+
+            uint_fast8_t idx = 0;
+
+            sys.homed.mask &= ~sys.homing.mask;
+
+            do {
+                if(settings.homing.cycle[idx].mask) {
+                    cycle.mask = settings.homing.cycle[idx].mask;
+                    if(!limits_go_home(cycle))
+                        break;
+                }
+            } while(++idx < N_AXIS);
+        }
+
+        // If hard limits feature enabled, re-enable hard limits pin change register after homing cycle.
+        // NOTE: always call at end of homing regadless of setting, may be used to disable
+        // sensorless homing or switch back to limit switches input (if different from homing switches)
+        hal.limits_enable(settings.limits.flags.hard_enabled, false);
     }
 
     if(cycle.mask) {
 
         if(!protocol_execute_realtime()) // Check for reset and set system abort.
             return Status_Unhandled;     // Did not complete. Alarm state set by mc_alarm.
+
+        if(home_all && settings.homing.flags.manual)
+        {
+            cycle.mask = AXES_BITMASK & ~sys.homing.mask;
+            sys.homed.mask = AXES_BITMASK;
+#ifdef KINEMATICS_API
+            kinematics.limits_set_machine_positions(cycle);
+#else
+            limits_set_machine_positions(cycle, false);
+#endif
+        }
 
         // Homing cycle complete! Setup system for normal operation.
         // -------------------------------------------------------------------------------------
@@ -600,11 +808,6 @@ status_code_t mc_homing_cycle (axes_signals_t cycle)
     }
 
     sys.report.homed = On;
-
-    // If hard limits feature enabled, re-enable hard limits pin change register after homing cycle.
-    // NOTE: always call at end of homing regadless of setting, may be used to disable
-    // sensorless homing or switch back to limit switches input (if different from homing switches)
-    hal.limits_enable(settings.limits.flags.hard_enabled, false);
 
     return settings.limits.flags.hard_enabled && settings.limits.flags.check_at_init && hal.limits_get_state().value
             ? Status_LimitsEngaged
@@ -630,9 +833,10 @@ gc_probe_t mc_probe_cycle (float *target, plan_line_data_t *pl_data, gc_parser_f
     sys.flags.probe_succeeded = Off; // Re-initialize probe history before beginning cycle.
     hal.probe_configure_invert_mask(parser_flags.probe_is_away);
 
-    // After syncing, check if probe is already triggered. If so, halt and issue alarm.
+    // After syncing, check if probe is already triggered or not connected. If so, halt and issue alarm.
     // NOTE: This probe initialization error applies to all probing cycles.
-    if (hal.probe_get_state()) { // Check probe pin state.
+    probe_state_t probe = hal.probe_get_state();
+    if (probe.triggered || !probe.connected) { // Check probe state.
         system_set_exec_alarm(Alarm_ProbeFailInitial);
         protocol_execute_realtime();
         hal.probe_configure_invert_mask(false); // Re-initialize invert mask before returning.
@@ -643,7 +847,7 @@ gc_probe_t mc_probe_cycle (float *target, plan_line_data_t *pl_data, gc_parser_f
     mc_line(target, pl_data);
 
     // Activate the probing state monitor in the stepper module.
-    sys_probe_state = Probe_Active;
+    sys_probing_state = Probing_Active;
 
     // Perform probing cycle. Wait here until probe is triggered or motion completes.
     system_set_exec_state_flag(EXEC_CYCLE_START);
@@ -655,7 +859,7 @@ gc_probe_t mc_probe_cycle (float *target, plan_line_data_t *pl_data, gc_parser_f
     // Probing cycle complete!
 
     // Set state variables and error out, if the probe failed and cycle with error is enabled.
-    if (sys_probe_state == Probe_Active) {
+    if (sys_probing_state == Probing_Active) {
         if (parser_flags.probe_is_no_error)
             memcpy(sys_probe_position, sys_position, sizeof(sys_position));
         else
@@ -663,7 +867,7 @@ gc_probe_t mc_probe_cycle (float *target, plan_line_data_t *pl_data, gc_parser_f
     } else
         sys.flags.probe_succeeded = On; // Indicate to system the probing cycle completed successfully.
 
-    sys_probe_state = Probe_Off;            // Ensure probe state monitor is disabled.
+    sys_probing_state = Probing_Off;        // Ensure probe state monitor is disabled.
     hal.probe_configure_invert_mask(false); // Re-initialize invert mask.
     protocol_execute_realtime();            // Check and execute run-time commands
 

@@ -5,7 +5,7 @@
 
   Part of GrblHAL
 
-  Copyright (c) 2018 Terje Io
+  Copyright (c) 2018-2020 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -28,17 +28,16 @@
 
 bool bluetooth_init (bluetooth_settings_t *settings);
 status_code_t bluetooth_setting (uint_fast16_t param, float value, char *svalue);
-void bluetooth_settings_report (void);
+void bluetooth_settings_report (setting_type_t setting);
 void bluetooth_settings_restore (void);
+char *bluetooth_get_device_mac (void);
+char *bluetooth_get_client_mac (void);
 
 uint32_t BTStreamAvailable (void);
 uint16_t BTStreamRXFree (void);
 int16_t BTStreamGetC (void);
 bool BTStreamSuspendInput (bool suspend);
-
-bool BTStreamPutC (const char c);
 void BTStreamWriteS (const char *data);
-
 void BTStreamFlush (void);
 void BTStreamCancel (void);
 

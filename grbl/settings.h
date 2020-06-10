@@ -2,7 +2,7 @@
   settings.h - eeprom configuration handling
   Part of Grbl
 
-  Copyright (c) 2017-2019 Terje Io
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
@@ -28,7 +28,7 @@
 
 // Version of the persistent storage data. Will be used to migrate existing data from older versions of Grbl
 // when firmware is upgraded. Always stored in byte 0 of eeprom
-#define SETTINGS_VERSION 15  // NOTE: Check settings_reset() when moving to next version.
+#define SETTINGS_VERSION 16  // NOTE: Check settings_reset() when moving to next version.
 
 // Define persistent storage memory address location values for Grbl settings and parameters
 // NOTE: 1KB persistent storage is the minimum required. The upper half is reserved for parameters and
@@ -78,7 +78,11 @@ typedef enum {
 #define N_COORDINATE_SYSTEMS (SettingIndex_NCoord - 3)  // Number of supported work coordinate systems (from index 1)
 
 // Define Grbl axis settings numbering scheme. Starts at Setting_AxisSettingsBase, every INCREMENT, over N_SETTINGS.
+#ifdef ENABLE_BACKLASH_COMPENSATION
+#define AXIS_N_SETTINGS          6
+#else
 #define AXIS_N_SETTINGS          4
+#endif
 #define AXIS_SETTINGS_INCREMENT  10  // Must be greater than the number of axis settings TODO: change to 100 to allow for a logical wider range of parameters?
 
 typedef enum {
@@ -271,36 +275,40 @@ extern const settings_restore_t settings_all;
 typedef union {
     uint16_t value;
     struct {
-        uint16_t report_inches                  :1,
-                laser_mode                      :1,
-                invert_probe_pin                :1,
-                disable_probe_pullup            :1,
-                restore_overrides               :1,
-                safety_door_ignore_when_idle    :1,
-                sleep_enable                    :1,
-                disable_laser_during_hold       :1,
-                force_initialization_alarm      :1,
-                unassigned0                     :1,
-                allow_probing_feed_override     :1,
-                report_alarm_substate           :1,
-                restore_after_feed_hold         :1,
-                unassigned1                     :1,
-                force_buffer_sync_on_wco_change :1,
-                lathe_mode                      :1;
+        uint16_t report_inches                :1,
+                 laser_mode                   :1,
+                 invert_probe_pin             :1,
+                 disable_probe_pullup         :1,
+                 restore_overrides            :1,
+                 safety_door_ignore_when_idle :1,
+                 sleep_enable                 :1,
+                 disable_laser_during_hold    :1,
+                 force_initialization_alarm   :1,
+                 unassigned1                  :1,
+                 allow_probing_feed_override  :1,
+                 unassigned2                  :1,
+                 restore_after_feed_hold      :1,
+                 probe_detection_enabled      :1,
+                 unassigned3                  :1,
+                 lathe_mode                   :1;
     };
 } settingflags_t;
 
 typedef union {
-    uint8_t mask;
+    uint16_t mask;
     struct {
-        uint8_t machine_position  :1,
-                buffer_state      :1,
-                line_numbers      :1,
-                feed_speed        :1,
-                pin_state         :1,
-                work_coord_offset :1,
-                overrides         :1,
-                probe_coordinates :1;
+        uint16_t machine_position   :1,
+                 buffer_state       :1,
+                 line_numbers       :1,
+                 feed_speed         :1,
+                 pin_state          :1,
+                 work_coord_offset  :1,
+                 overrides          :1,
+                 probe_coordinates  :1,
+                 sync_on_wco_change :1,
+                 parser_state       :1,
+                 alarm_substate     :1,
+                 unassigned         :5;
     };
 } reportmask_t;
 
@@ -360,7 +368,8 @@ typedef union {
                 single_axis_commands :1,
                 init_lock            :1,
                 force_set_origin     :1,
-                unassigned           :4;
+                manual               :1,
+                unassigned           :3;
     };
 } homing_settings_flags_t;
 

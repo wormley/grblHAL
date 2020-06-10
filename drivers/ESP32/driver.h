@@ -38,6 +38,8 @@
 
 #include "grbl/grbl.h"
 
+static const DRAM_ATTR float FZERO = 0.0f;
+
 //
 // Set config from compile definitions in CMakeLists.txt
 //
@@ -64,6 +66,16 @@
 #define WEBSOCKET_ENABLE 1
 #endif
 
+#ifdef BLUETOOTH_ENABLE
+#undef BLUETOOTH_ENABLE
+#define BLUETOOTH_ENABLE 1
+#endif
+
+#ifdef MPG_MODE_ENABLE
+#undef MPG_MODE_ENABLE
+#define MPG_MODE_ENABLE 1
+#endif
+
 #ifdef KEYPAD_ENABLE
 #undef KEYPAD_ENABLE
 #define KEYPAD_ENABLE 1
@@ -73,6 +85,12 @@
 #undef TRINAMIC_ENABLE
 #define TRINAMIC_ENABLE 1
 #define TRINAMIC_I2C    1
+#endif
+
+#ifndef CNC_BOOSTERPACK
+// NOTE: Only one board may be enabled!
+#define BOARD_BDRING_V4
+//#define BOARD_BDRING_V3P5
 #endif
 
 //
@@ -93,7 +111,6 @@
 #define PROBE_ENABLE     1 // Probe input
 #define PROBE_ISR        0 // Catch probe state change by interrupt TODO: needs verification!
 #define WIFI_SOFTAP      0 // Use Soft AP mode for WiFi.
-#define BLUETOOTH_ENABLE 0 // Streaming over Bluetooth.
 #define TRINAMIC_DEV     0 // Development mode, adds a few M-codes to aid debugging. Do not enable in production code
 
 // The following options should be set in CMakeLists.txt to ensure
@@ -109,6 +126,10 @@
 #define HTTP_ENABLE      0 // Enable http daemon - requires WiFi enabled
 #define TELNET_ENABLE    0 // Enable telnet daemon - requires WiFi enabled
 #define WEBSOCKET_ENABLE 0 // Enable websocket daemon - requires WiFi enabled
+#endif
+
+#ifndef BLUETOOTH_ENABLE
+#define BLUETOOTH_ENABLE 0 // Streaming over Bluetooth.
 #endif
 
 #ifndef AUTH_ENABLE
@@ -175,6 +196,11 @@
 #error "Networking protocols reqires WiFi enabled!"
 #endif // WIFI_ENABLE
 
+#if BLUETOOTH_ENABLE
+#define BLUETOOTH_DEVICE    "GRBL"
+#define BLUETOOTH_SERVICE   "GRBL Serial Port" // Minimum 8 characters, or blank for open
+#endif
+
 // End configuration
 
 #if TRINAMIC_ENABLE
@@ -216,99 +242,13 @@ extern driver_settings_t driver_settings;
 
 #endif
 
-#if CNC_BOOSTERPACK
-
-#define IOEXPAND 0
-
-#if SDCARD_ENABLE
-
-// Pin mapping when using SPI mode.
-// With this mapping, SD card can be used both in SPI and 1-line SD mode.
-// Note that a pull-up on CS line is required in SD mode.
-#define PIN_NUM_MISO 19
-#define PIN_NUM_MOSI 23
-#define PIN_NUM_CLK  18
-#define PIN_NUM_CS   5
-
-#endif // SDCARD_ENABLE
-
-// timer definitions
-#define STEP_TIMER_GROUP TIMER_GROUP_0
-#define STEP_TIMER_INDEX TIMER_0
-
-// Define step pulse output pins.
-#define X_STEP_PIN      GPIO_NUM_26
-#define Y_STEP_PIN      GPIO_NUM_27
-#define Z_STEP_PIN      GPIO_NUM_14
-#define STEP_MASK       (1ULL << X_STEP_PIN|1ULL << Y_STEP_PIN|1ULL << Z_STEP_PIN) // All step bits
-
-// Define step direction output pins. NOTE: All direction pins must be on the same port.
-#define X_DIRECTION_PIN     GPIO_NUM_2
-#define Y_DIRECTION_PIN     GPIO_NUM_15
-#define Z_DIRECTION_PIN     GPIO_NUM_12
-#define DIRECTION_MASK      (1ULL << X_DIRECTION_PIN|1ULL << Y_DIRECTION_PIN|1ULL << Z_DIRECTION_PIN) // All direction bits
-
-// Define stepper driver enable/disable output pin(s).
-#define STEPPERS_DISABLE_PIN    IOEXPAND
-#define STEPPERS_DISABLE_MASK   (1ULL << STEPPERS_DISABLE_PIN)
-
-// Define homing/hard limit switch input pins and limit interrupt vectors.
-#define X_LIMIT_PIN     GPIO_NUM_4
-#define Y_LIMIT_PIN     GPIO_NUM_16
-#define Z_LIMIT_PIN     GPIO_NUM_32
-#define LIMIT_MASK      (1ULL << X_LIMIT_PIN|1ULL << Y_LIMIT_PIN|1ULL << Z_LIMIT_PIN) // All limit bits
-
-// Define spindle enable and spindle direction output pins.
-#define SPINDLE_ENABLE_PIN      IOEXPAND
-#define SPINDLE_DIRECTION_PIN   IOEXPAND
-#define SPINDLE_MASK            (1ULL << SPINDLE_ENABLE_PIN|1ULL << SPINDLE_DIRECTION_PIN)
-#define SPINDLEPWMPIN           GPIO_NUM_17
-
-// Define flood and mist coolant enable output pins.
-
-#define COOLANT_FLOOD_PIN   IOEXPAND
-#define COOLANT_MIST_PIN    IOEXPAND
-#define COOLANT_MASK        (1UL << COOLANT_FLOOD_PIN|1ULL << COOLANT_MIST_PIN)
-
-// Define user-control CONTROLs (cycle start, reset, feed hold) input pins.
-#define RESET_PIN           GPIO_NUM_35
-#define FEED_HOLD_PIN       GPIO_NUM_39
-#define CYCLE_START_PIN     GPIO_NUM_36
-#define SAFETY_DOOR_PIN     GPIO_NUM_34
-#define CONTROL_MASK        (1UL << RESET_PIN|1UL << FEED_HOLD_PIN|1UL << CYCLE_START_PIN|1UL << SAFETY_DOOR_PIN)
-
-// Define probe switch input pin.
-#define PROBE_PIN       GPIO_NUM_13
-
-#if KEYPAD_ENABLE
-#define KEYPAD_STROBE_PIN   GPIO_NUM_33
-#endif
-
-#if IOEXPAND_ENABLE || KEYPAD_ENABLE || EEPROM_ENABLE || (TRINAMIC_ENABLE && TRINAMIC_I2C)
-// Define I2C port/pins
-#define I2C_PORT  I2C_NUM_1
-#define I2C_SDA   GPIO_NUM_21
-#define I2C_SCL   GPIO_NUM_22
-#define I2C_CLOCK 100000
-#endif
-
-#if IOEXPAND_ENABLE
-typedef union {
-    uint8_t mask;
-    struct {
-        uint8_t stepper_enable_z :1,
-                stepper_enable_y :1,
-                mist_on          :1,
-                flood_on         :1,
-                reserved         :1,
-                spindle_dir      :1,
-                stepper_enable_x :1,
-                spindle_on       :1;
-    };
-} ioexpand_t;
-#endif
-
-#else
+#ifdef CNC_BOOSTERPACK
+    #include "boosterpack_map.h"
+#elif defined(BOARD_BDRING_V4)
+    #include "bdring_v4_map.h"
+#elif defined(BOARD_BDRING_V3P5)
+    #include "bdring_v3.5_map.h"
+#else // default board - NOTE: NOT FINAL VERSION!
 
 #if SDCARD_ENABLE
 
@@ -407,6 +347,19 @@ typedef union {
 #ifdef I2C_PORT
 extern QueueHandle_t i2cQueue;
 extern SemaphoreHandle_t i2cBusy;
+#endif
+
+#ifndef GRBL_ESP32
+#error "Add #define GRBL_ESP32 in grbl/config.h or update your CMakeLists.txt to the latest version!"
+#endif
+
+#if MPG_MODE_ENABLE
+  #ifndef MPG_ENABLE_PIN
+  #error "MPG_ENABLE_PIN must be defined when MPG mode is enabled!"
+  #endif
+  #ifndef MPG_RX_PIN
+  #error "MPG_RX_PIN must be defined when MPG mode is enabled!"
+  #endif
 #endif
 
 void selectStream (stream_type_t stream);

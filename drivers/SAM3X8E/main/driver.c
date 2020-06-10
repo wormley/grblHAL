@@ -32,7 +32,7 @@
 #endif
 
 #if EEPROM_ENABLE
-#include "eeprom.h"
+#include "src/eeprom/eeprom.h"
 #endif
 
 #if KEYPAD_ENABLE
@@ -50,7 +50,15 @@
 #define OUTPUT true
 #endif
 #ifndef INPUT
-#define INPUT true
+#define INPUT false
+#endif
+
+#if defined(X_LIMIT_PIN_MAX) || defined(Y_LIMIT_PIN_MAX) || defined(Z_LIMIT_PIN_MAX) || defined(A_LIMIT_PIN_MAX) || defined(B_LIMIT_PIN_MAX) || defined(C_LIMIT_PIN_MAX)
+#define DUAL_LIMIT_SWITCHES
+#else
+  #ifdef SQUARING_ENABLED 
+    #error "Squaring requires at least one axis with dual switch inputs!"
+  #endif
 #endif
 
 typedef enum {
@@ -200,7 +208,40 @@ static void driver_delay_ms (uint32_t ms, void (*callback)(void))
 }
 
 // Set stepper pulse output pins
-#ifndef SQUARING_ENABLED
+#ifdef SQUARING_ENABLED
+inline static void set_step_outputs (axes_signals_t step_outbits_1)
+{
+    axes_signals_t step_outbits_2;
+
+    step_outbits_2.mask = (step_outbits_1.mask & motors_2.mask) ^= settings.steppers.step_invert.mask;
+    step_outbits_1.mask = (step_outbits_1.mask & motors_1.mask) ^= settings.steppers.step_invert.mask;
+
+    BITBAND_PERI(X_STEP_PORT->PIO_ODSR, X_STEP_PIN) = step_outbits_1.x;
+  #ifdef X2_STEP_PIN
+    BITBAND_PERI(X2_STEP_PORT->PIO_ODSR, X2_STEP_PIN) = step_outbits_2.x;
+  #endif
+
+    BITBAND_PERI(Y_STEP_PORT->PIO_ODSR, Y_STEP_PIN) = step_outbits_1.y;
+  #ifdef Y2_STEP_PIN
+    BITBAND_PERI(Y2_STEP_PORT->PIO_ODSR, Y2_STEP_PIN) = step_outbits_2.y;
+  #endif
+ 
+    BITBAND_PERI(Z_STEP_PORT->PIO_ODSR, Z_STEP_PIN) = step_outbits_1.z;
+  #ifdef Z2_STEP_PIN
+    BITBAND_PERI(Z2_STEP_PORT->PIO_ODSR, Z2_STEP_PIN) = step_outbits_2.z;
+  #endif
+
+  #ifdef A_STEP_PIN
+    BITBAND_PERI(A_STEP_PORT->PIO_ODSR, A_STEP_PIN) = step_outbits_1.a;
+  #endif
+  #ifdef B_STEP_PIN
+    BITBAND_PERI(B_STEP_PORT->PIO_ODSR, B_STEP_PIN) = step_outbits_1.b;
+  #endif
+  #ifdef C_STEP_PIN
+    BITBAND_PERI(C_STEP_PORT->PIO_ODSR, C_STEP_PIN) = step_outbits_1.c;
+  #endif
+}
+#else // SQUARING DISABLED
 inline static void set_step_outputs (axes_signals_t step_outbits)
 {
     step_outbits.value ^= settings.steppers.step_invert.mask;
@@ -208,50 +249,26 @@ inline static void set_step_outputs (axes_signals_t step_outbits)
     BITBAND_PERI(X_STEP_PORT->PIO_ODSR, X_STEP_PIN) = step_outbits.x;
   #ifdef X2_STEP_PIN
     BITBAND_PERI(X2_STEP_PORT->PIO_ODSR, X2_STEP_PIN) = step_outbits.x;
-  #elif defined(A_STEP_PIN)
-    BITBAND_PERI(A_STEP_PORT->PIO_ODSR, A_STEP_PIN) = step_outbits.a;
   #endif
-
+    
     BITBAND_PERI(Y_STEP_PORT->PIO_ODSR, Y_STEP_PIN) = step_outbits.y;
   #ifdef Y2_STEP_PIN
     BITBAND_PERI(Y2_STEP_PORT->PIO_ODSR, Y2_STEP_PIN) = step_outbits.y;
-  #elif defined(B_STEP_PIN)
-    BITBAND_PERI(B_STEP_PORT->PIO_ODSR, B_STEP_PIN) = step_outbits.b;
   #endif
 
     BITBAND_PERI(Z_STEP_PORT->PIO_ODSR, Z_STEP_PIN) = step_outbits.z;
   #ifdef Z2_STEP_PIN
     BITBAND_PERI(Z2_STEP_PORT->PIO_ODSR, Z2_STEP_PIN) = step_outbits.z;
-  #elif defined(C_STEP_PIN)
+  #endif 
+
+  #ifdef A_STEP_PIN
+    BITBAND_PERI(A_STEP_PORT->PIO_ODSR, A_STEP_PIN) = step_outbits.a;
+  #endif
+  #ifdef B_STEP_PIN
+    BITBAND_PERI(B_STEP_PORT->PIO_ODSR, B_STEP_PIN) = step_outbits.b;
+  #endif
+  #ifdef C_STEP_PIN
     BITBAND_PERI(C_STEP_PORT->PIO_ODSR, C_STEP_PIN) = step_outbits.c;
-  #endif
-}
-#else
-inline static void set_step_outputs (axes_signals_t step_outbits_1)
-{
-    axes_signals_t step_outbits_2 = (step_outbits_1.mask & motors_2.mask) ^ settings.steppers.step_invert.mask;
-
-    step_outbits_1.mask = (step_outbits_1.mask & motors_1.mask) ^ settings.steppers.step_invert.mask;
-
-    BITBAND_PERI(X_STEP_PORT->PIO_ODSR, X_STEP_PIN) = step_outbits_1.x;
-  #ifdef X2_STEP_PIN
-    BITBAND_PERI(X2_STEP_PORT->PIO_ODSR, X2_STEP_PIN) = step_outbits_2.x;
-  #elif defined(A_STEP_PIN)
-    BITBAND_PERI(A_STEP_PORT->PIO_ODSR, A_STEP_PIN) = step_outbits_1.a;
-  #endif
-
-    BITBAND_PERI(Y_STEP_PORT->PIO_ODSR, Y_STEP_PIN) = step_outbits_1.y;
-  #ifdef Y2_STEP_PIN
-    BITBAND_PERI(Y2_STEP_PORT->PIO_ODSR, Y2_STEP_PIN) = step_outbits_2.y;
-  #elif defined(B_STEP_PIN)
-    BITBAND_PERI(B_STEP_PORT->PIO_ODSR, B_STEP_PIN) = step_outbits_1.b;
-  #endif
-
-    BITBAND_PERI(Z_STEP_PORT->PIO_ODSR, Z_STEP_PIN) = step_outbits_1.z;
-  #ifdef Z2_STEP_PIN
-    BITBAND_PERI(Z2_STEP_PORT->PIO_ODSR, Z2_STEP_PIN) = step_outbits_2.z;
-  #elif defined(C_STEP_PIN)
-    BITBAND_PERI(C_STEP_PORT->PIO_ODSR, C_STEP_PIN) = step_outbits_1.c;
   #endif
 }
 #endif
@@ -265,8 +282,17 @@ inline static void set_dir_outputs (axes_signals_t dir_outbits)
   #ifdef X2_DIRECTION_PIN
     BITBAND_PERI(X2_DIRECTION_PORT->PIO_ODSR, X2_DIRECTION_PIN) = dir_outbits.x;
   #endif
+
     BITBAND_PERI(Y_DIRECTION_PORT->PIO_ODSR, Y_DIRECTION_PIN) = dir_outbits.y;
+  #ifdef Y2_DIRECTION_PIN
+    BITBAND_PERI(Y2_DIRECTION_PORT->PIO_ODSR, Y2_DIRECTION_PIN) = dir_outbits.y;
+  #endif
+
     BITBAND_PERI(Z_DIRECTION_PORT->PIO_ODSR, Z_DIRECTION_PIN) = dir_outbits.z;
+  #ifdef Z2_DIRECTION_PIN
+    BITBAND_PERI(Z2_DIRECTION_PORT->PIO_ODSR, Z2_DIRECTION_PIN) = dir_outbits.z;
+  #endif
+
   #ifdef A_STEP_PIN
     BITBAND_PERI(A_DIRECTION_PORT->PIO_ODSR, A_DIRECTION_PIN) = dir_outbits.a;
   #endif
@@ -292,16 +318,22 @@ static void stepperEnable (axes_signals_t enable)
   #ifdef Y_DISABLE_PIN
     BITBAND_PERI(Y_DISABLE_PORT->PIO_ODSR, Y_DISABLE_PIN) = enable.y;
   #endif
+  #ifdef Y2_DISABLE_PIN
+    BITBAND_PERI(Y2_DISABLE_PORT->PIO_ODSR, Y2_DISABLE_PIN) = enable.y;
+  #endif
   #ifdef Z_DISABLE_PIN
     BITBAND_PERI(Z_DISABLE_PORT->PIO_ODSR, Z_DISABLE_PIN) = enable.z;
   #endif
-  #ifdef A_STEP_PIN
+  #ifdef Z2_DISABLE_PIN
+    BITBAND_PERI(Z2_DISABLE_PORT->PIO_ODSR, Z2_DISABLE_PIN) = enable.z;
+  #endif
+  #ifdef A_DISABLE_PIN
     BITBAND_PERI(A_DISABLE_PORT->PIO_ODSR, A_DISABLE_PIN) = enable.a;
   #endif
-  #ifdef B_STEP_PIN
+  #ifdef B_DISABLE_PIN
     BITBAND_PERI(B_DISABLE_PORT->PIO_ODSR, B_DISABLE_PIN) = enable.b;
   #endif
-  #ifdef C_STEP_PIN
+  #ifdef C_DISABLE_PIN
     BITBAND_PERI(C_DISABLE_PORT->PIO_ODSR, C_DISABLE_PIN) = enable.c;
   #endif
 #endif
@@ -330,12 +362,14 @@ static void stepperGoIdle (bool clear_signals)
 // Sets up stepper driver interrupt timeout, AMASS version
 static void stepperCyclesPerTick (uint32_t cycles_per_tick)
 {
+    STEPPER_TIMER.TC_CCR = TC_CCR_CLKDIS;
 // Limit min steps/s to about 2 (hal.f_step_timer @ 20MHz)
 #ifdef ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
     STEPPER_TIMER.TC_RC = cycles_per_tick < (1UL << 18) ? cycles_per_tick : (1UL << 18) - 1UL;
 #else
     STEPPER_TIMER.TC_RC = cycles_per_tick < (1UL << 23) ? cycles_per_tick : (1UL << 23) - 1UL;
 #endif
+    STEPPER_TIMER.TC_CCR = TC_CCR_CLKEN|TC_CCR_SWTRG;
 }
 
 // Sets stepper direction and pulse pins and starts a step pulse
@@ -366,105 +400,148 @@ static void stepperPulseStartDelayed (stepper_t *stepper)
     }
 }
 
+#ifdef DUAL_LIMIT_SWITCHES
+
 // Returns limit state as an axes_signals_t variable.
 // Each bitfield bit indicates an axis limit, where triggered is 1 and not triggered is 0.
+// Dual limit switch inputs per axis version. Only one needs to be dual input!
 inline static axes_signals_t limitsGetState()
 {
-    axes_signals_t signals = {0};
+    axes_signals_t signals_min = {settings.limits.invert.mask}, signals_max = {settings.limits.invert.mask};
     
-    signals.x = BITBAND_PERI(X_LIMIT_PORT->PIO_PDSR, X_LIMIT_PIN);
-    signals.y = BITBAND_PERI(Y_LIMIT_PORT->PIO_PDSR, Y_LIMIT_PIN);
-    signals.z = BITBAND_PERI(Z_LIMIT_PORT->PIO_PDSR, Z_LIMIT_PIN);
-  #ifdef X_LIMIT_PIN_MAX
-    signals.x |= BITBAND_PERI(X_LIMIT_PORT_MAX->PIO_PDSR, X_LIMIT_PIN_MAX);
-  #endif
-  #ifdef Y_LIMIT_PIN_MAX
-    signals.y |= BITBAND_PERI(Y_LIMIT_PORT_MAX->PIO_PDSR, Y_LIMIT_PIN_MAX);
-  #endif
-  #ifdef Z_LIMIT_PIN_MAX
-    signals.z |= BITBAND_PERI(Z_LIMIT_PORT_MAX->PIO_PDSR, Z_LIMIT_PIN_MAX);
-  #endif
+    signals_min.x = BITBAND_PERI(X_LIMIT_PORT->PIO_PDSR, X_LIMIT_PIN);
+    signals_min.y = BITBAND_PERI(Y_LIMIT_PORT->PIO_PDSR, Y_LIMIT_PIN);
+    signals_min.z = BITBAND_PERI(Z_LIMIT_PORT->PIO_PDSR, Z_LIMIT_PIN);
   #ifdef A_LIMIT_PIN
-    signals.a = BITBAND_PERI(A_LIMIT_PORT->PIO_PDSR, A_LIMIT_PIN);
-  #endif
-  #ifdef A_LIMIT_PIN_MAX
-    signals.a |= BITBAND_PERI(A_LIMIT_PORT_MAX->PIO_PDSR, A_LIMIT_PIN_MAX);
+    signals_min.a = BITBAND_PERI(A_LIMIT_PORT->PIO_PDSR, A_LIMIT_PIN);
   #endif
   #ifdef B_LIMIT_PIN
-    signals.b = BITBAND_PERI(B_LIMIT_PORT->PIO_PDSR, B_LIMIT_PIN);
-  #endif
-  #ifdef B_LIMIT_PIN_MAX
-    signals.b |= BITBAND_PERI(B_LIMIT_PORT_MAX->PIO_PDSR, B_LIMIT_PIN_MAX);
+    signals_min.b = BITBAND_PERI(B_LIMIT_PORT->PIO_PDSR, B_LIMIT_PIN);
   #endif
   #ifdef C_LIMIT_PIN
-    signals.c = BITBAND_PERI(C_LIMIT_PORT->PIO_PDSR, C_LIMIT_PIN);
+    signals_min.c = BITBAND_PERI(C_LIMIT_PORT->PIO_PDSR, C_LIMIT_PIN);
+  #endif
+
+  #ifdef X_LIMIT_PIN_MAX
+    signals_max.x = BITBAND_PERI(X_LIMIT_PORT_MAX->PIO_PDSR, X_LIMIT_PIN_MAX);
+  #endif
+  #ifdef Y_LIMIT_PIN_MAX
+    signals_max.y = BITBAND_PERI(Y_LIMIT_PORT_MAX->PIO_PDSR, Y_LIMIT_PIN_MAX);
+  #endif
+  #ifdef Z_LIMIT_PIN_MAX
+    signals_max.z = BITBAND_PERI(Z_LIMIT_PORT_MAX->PIO_PDSR, Z_LIMIT_PIN_MAX);
+  #endif
+  #ifdef A_LIMIT_PIN_MAX
+    signals_max.a = BITBAND_PERI(A_LIMIT_PORT_MAX->PIO_PDSR, A_LIMIT_PIN_MAX);
+  #endif
+  #ifdef B_LIMIT_PIN_MAX
+    signals_max.b = BITBAND_PERI(B_LIMIT_PORT_MAX->PIO_PDSR, B_LIMIT_PIN_MAX);
   #endif
   #ifdef C_LIMIT_PIN_MAX
-    signals.c |= BITBAND_PERI(C_LIMIT_PORT_MAX->PIO_PDSR, C_LIMIT_PIN_MAX);
+    signals_max.c = BITBAND_PERI(C_LIMIT_PORT_MAX->PIO_PDSR, C_LIMIT_PIN_MAX);
+  #endif
+
+    if (settings.limits.invert.mask) {
+        signals_min.value ^= settings.limits.invert.mask;
+        signals_max.value ^= settings.limits.invert.mask;
+    }
+
+    signals_min.value |= signals_max.value;
+
+    return signals_min;
+}
+
+#else // SINGLE INPUT LIMIT SWITCHES
+
+// Returns limit state as an axes_signals_t variable.
+// Each bitfield bit indicates an axis limit, where triggered is 1 and not triggered is 0.
+// Single limit switch input per axis version.
+inline static axes_signals_t limitsGetState()
+{
+    axes_signals_t signals_min = {settings.limits.invert.mask}, signals_max = {settings.limits.invert.mask};
+    
+    signals_min.x = BITBAND_PERI(X_LIMIT_PORT->PIO_PDSR, X_LIMIT_PIN);
+    signals_min.y = BITBAND_PERI(Y_LIMIT_PORT->PIO_PDSR, Y_LIMIT_PIN);
+    signals_min.z = BITBAND_PERI(Z_LIMIT_PORT->PIO_PDSR, Z_LIMIT_PIN);
+  #ifdef A_LIMIT_PIN
+    signals_min.a = BITBAND_PERI(A_LIMIT_PORT->PIO_PDSR, A_LIMIT_PIN);
+  #endif
+  #ifdef B_LIMIT_PIN
+    signals_min.b = BITBAND_PERI(B_LIMIT_PORT->PIO_PDSR, B_LIMIT_PIN);
+  #endif
+  #ifdef C_LIMIT_PIN
+    signals_min.c = BITBAND_PERI(C_LIMIT_PORT->PIO_PDSR, C_LIMIT_PIN);
   #endif
 
     if (settings.limits.invert.mask)
-        signals.value ^= settings.limits.invert.mask;
+        signals_min.value ^= settings.limits.invert.mask;
 
-    return signals;
+    return signals_min;
 }
+
+#endif
 
 #ifdef SQUARING_ENABLED
 
 // Enable/disable motors for auto squaring of ganged axes
-static void StepperDisableMotors(axes_signals_t axes, squaring_mode_t mode)
+static void StepperDisableMotors (axes_signals_t axes, squaring_mode_t mode)
 {
-    motors_1.mask = (mode == SquaringMode_A || SquaringMode_Both ? axes.mask : 0);
-    motors_2.mask = (mode == SquaringMode_B || SquaringMode_Both ? axes.mask : 0);
-
+    motors_1.mask = (mode == SquaringMode_A || mode == SquaringMode_Both ? axes.mask : 0);
+    motors_2.mask = (mode == SquaringMode_B || mode == SquaringMode_Both ? axes.mask : 0);
+/*
     if(hal.driver_cap.axis_ganged_x) {
         BITBAND_PERI(X_DISABLE_PORT->PIO_ODSR, X_DISABLE_PIN) = motors_1.x ^ settings.steppers.enable_invert.mask.x;
       #ifdef A_DISABLE_PIN
-        BITBAND_PERI(A_DISABLE_PORT->PIO_ODSR, A_DISABLE_PIN) = motors_2.x ^ settings.steppers.enable_invert.mask.x;;
+        BITBAND_PERI(A_DISABLE_PORT->PIO_ODSR, A_DISABLE_PIN) = motors_2.x ^ settings.steppers.enable_invert.mask.x;
       #endif
     }
+*/
 }
 
 // Returns limit state as an axes_signals_t variable.
 // Each bitfield bit indicates an axis limit, where triggered is 1 and not triggered is 0.
 inline static axes_signals_t limitsGetHomeState()
 {
-    axes_signals_t signals = {0};
+    axes_signals_t signals_min = {0}, signals_max = {0};
     
     if(motors_1.mask) {
-        if(motors_1.x) {
-            signals.x = BITBAND_PERI(X_LIMIT_PORT->PIO_PDSR, X_LIMIT_PIN);
-          #ifdef X_LIMIT_PIN_MAX
-            signals.x |= BITBAND_PERI(X_LIMIT_PORT_MAX->PIO_PDSR, X_LIMIT_PIN_MAX);
-          #endif
-        }
-        if(motors_1.y) {
-            signals.y = BITBAND_PERI(Y_LIMIT_PORT->PIO_PDSR, Y_LIMIT_PIN);
-          #ifdef Y_LIMIT_PIN_MAX
-            signals.y |= BITBAND_PERI(Y_LIMIT_PORT_MAX->PIO_PDSR, Y_LIMIT_PIN_MAX);
-          #endif
-        }
-        if(motors_1.z) {
-            signals.z = BITBAND_PERI(Z_LIMIT_PORT->PIO_PDSR, Z_LIMIT_PIN);;
-          #ifdef Z_LIMIT_PIN_MAX
-            signals.z |= BITBAND_PERI(Z_LIMIT_PORT_MAX->PIO_PDSR, Z_LIMIT_PIN_MAX);
-          #endif
-        }
+
+        signals_min.mask = settings.limits.invert.mask;
+
+        if(motors_1.x)
+            signals_min.x = BITBAND_PERI(X_LIMIT_PORT->PIO_PDSR, X_LIMIT_PIN);
+        if(motors_1.y)
+            signals_min.y = BITBAND_PERI(Y_LIMIT_PORT->PIO_PDSR, Y_LIMIT_PIN);
+        if(motors_1.z)
+            signals_min.z = BITBAND_PERI(Z_LIMIT_PORT->PIO_PDSR, Z_LIMIT_PIN);;
+
+        if (settings.limits.invert.mask)
+            signals_min.mask ^= settings.limits.invert.mask;
     }
 
     if(motors_2.mask) {
-        if(motors_1.x) {
-            signals.x |= BITBAND_PERI(A_LIMIT_PORT->PIO_PDSR, A_LIMIT_PIN);
-          #ifdef A_LIMIT_PIN_MAX
-            signals.x |= signals.x | BITBAND_PERI(A_LIMIT_PORT_MAX->PIO_PDSR, A_LIMIT_PIN_MAX);
-          #endif
-        }
+
+       signals_max.mask = settings.limits.invert.mask;
+
+#ifdef X_LIMIT_PIN_MAX
+        if(motors_2.x)
+            signals_max.x = BITBAND_PERI(X_LIMIT_PORT_MAX->PIO_PDSR, X_LIMIT_PIN_MAX);
+#endif
+#ifdef Y_LIMIT_PIN_MAX
+        if(motors_2.y)
+            signals_max.y = BITBAND_PERI(Y_LIMIT_PORT_MAX->PIO_PDSR, Y_LIMIT_PIN_MAX);
+#endif
+#ifdef Z_LIMIT_PIN_MAX
+        if(motors_2.z)
+            signals_max.z = BITBAND_PERI(Z_LIMIT_PORT_MAX->PIO_PDSR, Z_LIMIT_PIN_MAX);
+#endif
+        if (settings.limits.invert.mask)
+            signals_max.mask ^= settings.limits.invert.mask;
     }
 
-    if (settings.limits.invert.mask)
-        signals.value ^= settings.limits.invert.mask;
+    signals_min.mask |= signals_max.mask;
 
-    return signals;
+    return signals_min;
 }
 
 #endif
@@ -530,18 +607,20 @@ static void probeConfigureInvertMask (bool is_probe_away)
       probe_invert = !probe_invert;
 }
 
-// Returns the probe pin state. Triggered = true.
+// Returns the probe connected and triggered pin states.
+probe_state_t probeGetState (void)
+{
+    probe_state_t state = {
+        .connected = On
+    };
+
 #ifdef PROBE_PIN
-bool probeGetState (void)
-{
-    return BITBAND_PERI(PROBE_PORT->PIO_PDSR, PROBE_PIN) ^ probe_invert;
-}
+    state.triggered = BITBAND_PERI(PROBE_PORT->PIO_PDSR, PROBE_PIN) ^ probe_invert;
 #else
-bool probeGetState (void)
-{
-    return false;
-}
+    state.triggered = false;
 #endif
+    return state;
+}
 
 // Static spindle (off, on cw & on ccw)
 
@@ -781,8 +860,6 @@ static void PIO_InputMode (Pio *port, uint32_t bit, bool no_pullup, gpio_intr_t 
 // Configures perhipherals when settings are initialized or changed
 void settings_changed (settings_t *settings)
 {
-    hal.driver_cap.variable_spindle = spindle_precompute_pwm_values(&spindle_pwm, hal.f_step_timer);
-
     if(IOInitDone) {
 
       #if TRINAMIC_ENABLE
@@ -790,7 +867,8 @@ void settings_changed (settings_t *settings)
       #endif
 
         stepperEnable(settings->steppers.deenergize);
-        if(hal.driver_cap.variable_spindle) {
+
+        if(hal.driver_cap.variable_spindle && spindle_precompute_pwm_values(&spindle_pwm, hal.f_step_timer)) {
             SPINDLE_PWM_TIMER.TC_RC = spindle_pwm.period;
             hal.spindle_set_state = spindleSetStateVariable;
         } else
@@ -1043,7 +1121,7 @@ static bool driver_setup (settings_t *settings)
 
     IRQRegister(STEPPER_TIMER_IRQn, STEPPER_IRQHandler);
     NVIC_EnableIRQ(STEPPER_TIMER_IRQn); // Enable stepper interrupt
-    NVIC_SetPriority(STEPPER_TIMER_IRQn, 1);
+    NVIC_SetPriority(STEPPER_TIMER_IRQn, 2);
 
     STEP_TIMER.TC_CCR = TC_CCR_CLKDIS;
     STEP_TIMER.TC_CMR = TC_CMR_WAVE|TC_CMR_WAVSEL_UP|TC_CMR_CPCSTOP;
@@ -1066,6 +1144,15 @@ static bool driver_setup (settings_t *settings)
   #ifdef C_STEP_PIN
     PIO_Mode(C_STEP_PORT, C_STEP_BIT, OUTPUT);
   #endif
+  #ifdef X2_STEP_PIN
+    PIO_Mode(X2_STEP_PORT, X2_STEP_BIT, OUTPUT);
+  #endif
+  #ifdef Y2_STEP_PIN
+    PIO_Mode(Y2_STEP_PORT, Y2_STEP_BIT, OUTPUT);
+  #endif
+  #ifdef Z2_STEP_PIN
+    PIO_Mode(Z2_STEP_PORT, Z2_STEP_BIT, OUTPUT);
+  #endif
 
     PIO_Mode(X_DIRECTION_PORT, X_DIRECTION_BIT, OUTPUT);
     PIO_Mode(Y_DIRECTION_PORT, Y_DIRECTION_BIT, OUTPUT);
@@ -1078,6 +1165,15 @@ static bool driver_setup (settings_t *settings)
   #endif
   #ifdef C_DIRECTION_PIN
     PIO_Mode(C_DIRECTION_PORT, C_DIRECTION_BIT, OUTPUT);
+  #endif
+  #ifdef X2_DIRECTION_PIN
+    PIO_Mode(X2_DIRECTION_PORT, X2_DIRECTION_BIT, OUTPUT);
+  #endif
+  #ifdef Y2_DIRECTION_PIN
+    PIO_Mode(Y2_DIRECTION_PORT, Y2_DIRECTION_BIT, OUTPUT);
+  #endif
+  #ifdef Z2_DIRECTION_PIN
+    PIO_Mode(Z2_DIRECTION_PORT, Z2_DIRECTION_BIT, OUTPUT);
   #endif
 
     PIO_Mode(X_DISABLE_PORT, X_DISABLE_BIT, OUTPUT);
@@ -1095,6 +1191,15 @@ static bool driver_setup (settings_t *settings)
   #endif
   #ifdef C_DISABLE_PIN
     PIO_Mode(C_DISABLE_PORT, C_DISABLE_BIT, OUTPUT);
+  #endif
+  #ifdef X2_DISABLE_PIN
+    PIO_Mode(X2_DISABLE_PORT, X2_DISABLE_BIT, OUTPUT);
+  #endif
+  #ifdef Y2_DISABLE_PIN
+    PIO_Mode(Y2_DISABLE_PORT, Y2_DISABLE_BIT, OUTPUT);
+  #endif
+  #ifdef Z2_DISABLE_PIN
+    PIO_Mode(Z2_DISABLE_PORT, Z2_DISABLE_BIT, OUTPUT);
   #endif
 
   // Software debounce init
@@ -1197,7 +1302,7 @@ static bool driver_setup (settings_t *settings)
 
  // Set defaults
 
-    IOInitDone = settings->version == 15;
+    IOInitDone = settings->version == 16;
 
     settings_changed(settings);
 
@@ -1373,10 +1478,14 @@ bool driver_init (void)
 
     IRQRegister(SysTick_IRQn, SysTick_IRQHandler);
 
-    NVIC_SetPriority(SysTick_IRQn, (1 << __NVIC_PRIO_BITS) - 1);
+//    NVIC_SetPriority(SysTick_IRQn, (1 << __NVIC_PRIO_BITS) - 1);
     NVIC_EnableIRQ(SysTick_IRQn);
 
     hal.info = "SAM3X8E";
+	hal.driver_version = "200528";
+#ifdef BOARD_NAME
+    hal.board = BOARD_NAME;
+#endif
     hal.driver_setup = driver_setup;
     hal.f_step_timer = SystemCoreClock / 2; // 42 MHz
     hal.rx_buffer_size = RX_BUFFER_SIZE;
@@ -1438,7 +1547,7 @@ bool driver_init (void)
     hal.eeprom.size = GRBL_EEPROM_SIZE;
 
 #if EEPROM_ENABLE
-    eeprom_init();
+    eepromInit();
     hal.eeprom.type = EEPROM_Physical;
     hal.eeprom.get_byte = eepromGetByte;
     hal.eeprom.put_byte = eepromPutByte;
@@ -1454,7 +1563,7 @@ bool driver_init (void)
 #endif
 
 #if KEYPAD_ENABLE || (TRINAMIC_ENABLE && TRINAMIC_I2C)
-    I2CInit();
+    i2c_init();
 #endif
 
 #ifdef DRIVER_SETTINGS
@@ -1497,15 +1606,24 @@ bool driver_init (void)
 #ifdef SAFETY_DOOR_PIN
     hal.driver_cap.safety_door = On;
 #endif
+#ifdef COOLANT_MIST_PIN
+    hal.driver_cap.mist_control = On;
+#endif
     hal.driver_cap.software_debounce = On;
     hal.driver_cap.step_pulse_delay = On;
     hal.driver_cap.amass_level = 3;
     hal.driver_cap.control_pull_up = On;
     hal.driver_cap.limits_pull_up = On;
     hal.driver_cap.probe_pull_up = On;
-#ifdef SQUARING_ENABLED
-  #ifdef X2_DISABLE_PIN
+#ifdef SQUARING_ENABLED 
+  #ifdef X2_STEP_PIN
     hal.driver_cap.axis_ganged_x = On;
+  #endif
+  #ifdef Y2_STEP_PIN
+    hal.driver_cap.axis_ganged_y = On;
+  #endif
+  #ifdef Z2_STEP_PIN
+    hal.driver_cap.axis_ganged_z = On;
   #endif
 #endif
 
@@ -1649,6 +1767,9 @@ static void PIOD_IRQHandler (void)
 // Interrupt handler for 1 ms interval timer
 static void SysTick_IRQHandler (void)
 {
+
+#if USB_SERIAL || SDCARD_ENABLE
+
 #if USB_SERIAL
     SysTick_Handler(); // SerialUSB needs the Arduino SysTick handler running
 #endif
@@ -1659,6 +1780,7 @@ static void SysTick_IRQHandler (void)
         disk_timerproc();
         fatfs_ticks = 10;
     }
+#endif
 
     if(delay_ms.ms && !(--delay_ms.ms)) {
         if(delay_ms.callback) {
@@ -1668,9 +1790,7 @@ static void SysTick_IRQHandler (void)
     }
 #else
     if(!(--delay_ms.ms)) {
-  #if USB_SERIAL == 0
         SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
-  #endif
         if(delay_ms.callback) {
             delay_ms.callback();
             delay_ms.callback = NULL;

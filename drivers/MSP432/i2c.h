@@ -1,5 +1,5 @@
 /*
-  i2c.h - I2C support for keypad and Trinamic plugins
+  i2c.h - I2C support for EEPROM, keypad and Trinamic plugins
 
   Part of GrblHAL
 
@@ -23,8 +23,9 @@
 #define __I2C_DRIVER_H__
 
 #include "driver.h"
+#include "grbl/plugins.h"
 
-void I2CInit (void);
+void i2c_init (void);
 bool I2CPOS (void);
 
 #if TRINAMIC_ENABLE && TRINAMIC_I2C

@@ -2,7 +2,7 @@
   system.c - Handles system level commands and real-time processes
   Part of Grbl
 
-  Copyright (c) 2017-2019 Terje Io
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2014-2016 Sungeun K. Jeon for Gnea Research LLC
 
   Grbl is free software: you can redistribute it and/or modify
@@ -27,25 +27,36 @@
 // directly from the incoming data stream.
 ISR_CODE void control_interrupt_handler (control_signals_t signals)
 {
+    if(signals.deasserted)
+        return; // for now...
+
     if (signals.value) {
         if ((signals.reset || signals.e_stop) && sys.state != STATE_ESTOP)
             mc_reset();
         else {
+#ifdef ENABLE_SAFETY_DOOR_INPUT_PIN
             if (signals.safety_door_ajar) {
                 if(settings.flags.safety_door_ignore_when_idle) {
                     // Only stop the spindle (laser off) when idle or jogging,
                     // this to allow positioning the controlled point (spindle) when door is open.
                     // NOTE: at least for lasers there should be an external interlock blocking laser power.
                     if(sys.state != STATE_IDLE && sys.state != STATE_JOG)
-                        bit_true(sys_rt_exec_state, EXEC_SAFETY_DOOR);
+                        system_set_exec_state_flag(EXEC_SAFETY_DOOR);
                     hal.spindle_set_state((spindle_state_t){0}, 0.0f); // TODO: stop spindle in laser mode only?
                 } else
-                    bit_true(sys_rt_exec_state, EXEC_SAFETY_DOOR);
+                    system_set_exec_state_flag(EXEC_SAFETY_DOOR);
             }
-            if (signals.feed_hold)
-                bit_true(sys_rt_exec_state, EXEC_FEED_HOLD);
+#endif
+            if (signals.probe_triggered && sys_probing_state == Probing_Off && (sys.state & (STATE_CYCLE|STATE_JOG))) {
+                system_set_exec_state_flag(EXEC_FEED_HOLD);
+                sys.alarm_pending = Alarm_ProbeProtect;
+            } else if (signals.probe_disconnected && sys_probing_state == Probing_Active && sys.state == STATE_CYCLE) {
+                system_set_exec_state_flag(EXEC_FEED_HOLD);
+                sys.alarm_pending = Alarm_ProbeProtect;
+            } else if (signals.feed_hold)
+                system_set_exec_state_flag(EXEC_FEED_HOLD);
             else if (signals.cycle_start)
-                bit_true(sys_rt_exec_state, EXEC_CYCLE_START);
+                system_set_exec_state_flag(EXEC_CYCLE_START);
         }
     }
 }
@@ -204,10 +215,6 @@ status_code_t system_execute_line (char *line)
 
             if(retval == Status_OK) {
 
-                set_state(STATE_HOMING);                                // Set homing system state,
-                hal.stream.enqueue_realtime_command(CMD_STATUS_REPORT); // force a status report and
-                delay_sec(0.1f, DelayMode_Dwell);                       // delay a bit to get it sent (or perhaps wait a bit for a request?)
-
                 if (line[2] == '\0')
                     retval = mc_homing_cycle((axes_signals_t){0}); // Home axes according to configuration
 
@@ -252,6 +259,9 @@ status_code_t system_execute_line (char *line)
                 if (line[2] == '\0')
                     system_execute_startup(line); // TODO: only after all configured axes homed?
             }
+
+            if(retval != Status_InvalidStatement)
+                retval = Status_OK;
             break;
 
         case 'S': // Puts Grbl to sleep [IDLE/ALARM]
@@ -266,14 +276,14 @@ status_code_t system_execute_line (char *line)
         case '#': // Print Grbl NGC parameters
             if (line[2] != '\0')
                 retval = Status_InvalidStatement;
-            else if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP))))
+            else if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))))
                 retval = Status_IdleError;
             else
                 report_ngc_parameters();
             break;
 
         case 'I': // Print or store build info. [IDLE/ALARM]
-            if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP))))
+            if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))))
                 retval = Status_IdleError;
             else if (line[2] == '\0') {
                 settings_read_build_info(line);
@@ -333,7 +343,7 @@ status_code_t system_execute_line (char *line)
             break;
 
         case 'N': // Startup lines. [IDLE/ALARM]
-            if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP))))
+            if (!(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))))
                 retval = Status_IdleError;
             else if (line[2] == '\0') { // Print startup lines
                 uint_fast8_t counter;
@@ -383,7 +393,7 @@ status_code_t system_execute_line (char *line)
 
             if (retval == Status_Unhandled) {
                 // Check for global setting, store if so
-                if(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP))) {
+                if(sys.state == STATE_IDLE || (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_CHECK_MODE))) {
                     uint_fast8_t counter = 1;
                     float parameter;
                     if(!read_float(line, &counter, &parameter))
@@ -402,7 +412,7 @@ status_code_t system_execute_line (char *line)
 
 void system_flag_wco_change ()
 {
-    if(!settings.flags.force_buffer_sync_on_wco_change)
+    if(!settings.status_report.sync_on_wco_change)
         protocol_buffer_synchronize();
 
     sys.report.wco = On;
@@ -436,13 +446,14 @@ bool system_check_travel_limits (float *target)
         do {
             idx--;
         // When homing forced set origin is enabled, soft limits checks need to account for directionality.
-            failed = bit_istrue(settings.homing.dir_mask.value, bit(idx))
-                      ? (target[idx] < 0.0f || target[idx] > -settings.max_travel[idx])
-                      : (target[idx] > 0.0f || target[idx] < settings.max_travel[idx]);
+            failed = settings.max_travel[idx] < -0.0f &&
+                      (bit_istrue(settings.homing.dir_mask.value, bit(idx))
+                        ? (target[idx] < 0.0f || target[idx] > -settings.max_travel[idx])
+                        : (target[idx] > 0.0f || target[idx] < settings.max_travel[idx]));
         } while(!failed && idx);
     } else do {
         idx--;
-        failed = target[idx] > 0.0f || target[idx] < settings.max_travel[idx];
+        failed = settings.max_travel[idx] < -0.0f && (target[idx] > 0.0f || target[idx] < settings.max_travel[idx]);
     } while(!failed && idx);
 
     return !failed;
@@ -453,12 +464,12 @@ bool system_check_travel_limits (float *target)
 // NOTE: max_travel is stored as negative
 void system_apply_jog_limits (float *target)
 {
-    float pulloff = settings.limits.flags.hard_enabled ? settings.homing.pulloff : 0.0f;
     uint_fast8_t idx = N_AXIS;
 
     if(sys.homed.mask) do {
         idx--;
-        if(bit_istrue(sys.homed.mask, bit(idx))) {
+        float pulloff = settings.limits.flags.hard_enabled && bit_istrue(sys.homing.mask, bit(idx)) ? settings.homing.pulloff : 0.0f;
+        if(bit_istrue(sys.homed.mask, bit(idx)) && settings.max_travel[idx] < -0.0f) {
             if(settings.homing.flags.force_set_origin) {
                 if(bit_isfalse(settings.homing.dir_mask.value, bit(idx))) {
                     if(target[idx] > 0.0f)

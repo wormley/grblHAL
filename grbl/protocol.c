@@ -2,7 +2,7 @@
   protocol.c - controls Grbl execution protocol and procedures
   Part of Grbl
 
-  Copyright (c) 2017-2019 Terje Io
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
@@ -100,12 +100,14 @@ bool protocol_main_loop(bool cold_start)
         set_state(STATE_ALARM); // Ensure alarm state is set.
         hal.report.feedback_message(Message_AlarmLock);
     } else {
-        // Check if the safety door is open.
         set_state(STATE_IDLE);
+#ifdef ENABLE_SAFETY_DOOR_INPUT_PIN
+        // Check if the safety door is open.
         if (!settings.flags.safety_door_ignore_when_idle && hal.system_control_get_state().safety_door_ajar) {
             bit_true(sys_rt_exec_state, EXEC_SAFETY_DOOR);
             protocol_execute_realtime(); // Enter safety door mode. Should return as IDLE state.
         }
+#endif
         // All systems go!
         system_execute_startup(line); // Execute startup script.
     }
@@ -118,7 +120,7 @@ bool protocol_main_loop(bool cold_start)
     int16_t c;
     char eol = '\0';
     line_flags_t line_flags = {0};
-    bool nocaps = false, gcode_error = false;
+    bool nocaps = false;
 
     xcommand[0] = '\0';
     user_message.show = keep_rt_commands = false;
@@ -132,7 +134,7 @@ bool protocol_main_loop(bool cold_start)
             if(c == ASCII_CAN) {
 
                 eol = xcommand[0] = '\0';
-                keep_rt_commands = nocaps = gcode_error = user_message.show = false;
+                keep_rt_commands = nocaps = user_message.show = false;
                 char_counter = line_flags.value = 0;
                 gc_state.last_error = Status_OK;
 
@@ -164,23 +166,33 @@ bool protocol_main_loop(bool cold_start)
                 else if ((line[0] == '\0' || char_counter == 0) && !user_message.show) // Empty or comment line. For syncing purposes.
                     gc_state.last_error = Status_OK;
                 else if (line[0] == '$') {// Grbl '$' system command
-                    gcode_error = false;
                     if((gc_state.last_error = system_execute_line(line)) == Status_LimitsEngaged) {
                         set_state(STATE_ALARM); // Ensure alarm state is active.
                         report_alarm_message(Alarm_LimitsEngaged);
                         hal.report.feedback_message(Message_CheckLimits);
                     }
-                } else if (line[0] == '[' && hal.user_command_execute) {
-                    gcode_error = false;
+                } else if (line[0] == '[' && hal.user_command_execute)
                     gc_state.last_error = hal.user_command_execute(line);
-                } else if (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) // Everything else is gcode. Block if in alarm, eStop or jog mode.
+                else if (sys.state & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) // Everything else is gcode. Block if in alarm, eStop or jog mode.
                     gc_state.last_error = Status_SystemGClock;
-                else if(!gcode_error) { // Parse and execute g-code block.
-                    gc_state.last_error = gc_execute_block(line, user_message.show ? user_message.message : NULL);
 #if COMPATIBILITY_LEVEL == 0
-                    gcode_error = gc_state.last_error != Status_OK;
+                else if(gc_state.last_error == Status_OK) { // Parse and execute g-code block.
+#else
+                else { // Parse and execute g-code block.
+
 #endif
+                    gc_state.last_error = gc_execute_block(line, user_message.show ? user_message.message : NULL);
                 }
+
+                // Add a short delay for each block processed in Check Mode to
+                // avoid overwhelming the sender with fast reply messages.
+                // This is likely to happen when streaming is done via a protocol where
+                // the speed is not limited to 115200 baud. An example is native USB streaming.
+#if CHECK_MODE_DELAY
+                if(sys.state == STATE_CHECK_MODE)
+                    hal.delay_ms(CHECK_MODE_DELAY, NULL);
+#endif
+
                 hal.report.status_message(gc_state.last_error);
 
                 // Reset tracking data for next line.
@@ -323,9 +335,6 @@ bool protocol_execute_realtime ()
 {
     if(protocol_exec_rt_system()) {
 
-        if(hal.execute_realtime)
-            hal.execute_realtime(sys.state);
-
         if (sys.suspend)
             protocol_exec_rt_suspend();
 
@@ -389,9 +398,13 @@ bool protocol_exec_rt_system ()
                 // the user and a GUI time to do what is needed before resetting, like killing the
                 // incoming stream. The same could be said about soft limits. While the position is not
                 // lost, continued streaming could cause a serious crash if by chance it gets executed.
-         //       hal.delay_ms(20, NULL);
-                if (system_clear_exec_state_flag(EXEC_STATUS_REPORT) & EXEC_STATUS_REPORT)
+                if(bit_istrue(sys_rt_exec_state, EXEC_STATUS_REPORT)) {
+                    system_clear_exec_state_flag(EXEC_STATUS_REPORT);
                     report_realtime_status();
+                }
+
+                if(hal.execute_realtime)
+                    hal.execute_realtime(STATE_ESTOP);
             }
             system_clear_exec_alarm(); // Clear alarm
         }
@@ -420,6 +433,7 @@ bool protocol_exec_rt_system ()
             gc_state.tool_change = false;
             gc_state.modal.coolant.value = 0;
             gc_state.modal.spindle.value = 0;
+            gc_state.spindle.rpm = sys.spindle_rpm = 0.0f;
             gc_state.modal.spindle_rpm_mode = SpindleSpeedMode_RPM;
 
             // Kill spindle and coolant. TODO: Check Mach3 behaviour?
@@ -447,11 +461,14 @@ bool protocol_exec_rt_system ()
         if(rt_exec & EXEC_GCODE_REPORT)
             report_gcode_modes();
 
+        if(rt_exec & EXEC_TLO_REPORT)
+            report_tool_offsets();
+
         // Execute and print PID log to output stream
         if (rt_exec & EXEC_PID_REPORT)
             report_pid_log();
 
-        rt_exec &= ~(EXEC_STOP|EXEC_STATUS_REPORT|EXEC_GCODE_REPORT|EXEC_PID_REPORT); // clear requests already processed
+        rt_exec &= ~(EXEC_STOP|EXEC_STATUS_REPORT|EXEC_GCODE_REPORT|EXEC_PID_REPORT|EXEC_TLO_REPORT); // clear requests already processed
 
         if(sys.flags.feed_hold_pending) {
             if(rt_exec & EXEC_CYCLE_START)
@@ -464,6 +481,9 @@ bool protocol_exec_rt_system ()
         if(rt_exec)
             update_state(rt_exec);
     }
+
+    if(hal.execute_realtime)
+        hal.execute_realtime(sys.state);
 
     if(!sys.flags.delay_overrides) {
 
@@ -663,8 +683,12 @@ ISR_CODE bool protocol_enqueue_realtime_command (char c)
             drop = true;
             break;
 
-        case CMD_STATUS_REPORT_ALL: // Add all statuses to report
-            sys.report.value = (uint16_t)-1;
+        case CMD_STATUS_REPORT_ALL: // Add all statuses on to report
+            {
+                bool tlo = sys.report.tool_offset;
+                sys.report.value = (uint16_t)-1;
+                sys.report.tool_offset = tlo;
+            }
             // no break
 
         case CMD_STATUS_REPORT:

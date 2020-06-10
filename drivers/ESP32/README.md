@@ -6,6 +6,20 @@ A GrblHAL driver for the ESP32 processor.
 
 ---
 
+__NOTE:__ `grbl/config.h` or `CMakeLists.txt` may need modification before compilation. If needed an `#error` (with instructions) will be generated when compiling.
+
+---
+
+__Update 2020-02-06:__ Added option for secondary serial input stream with input pin for switching on/off, indended for external MPGs. **For verification!**
+
+---
+
+---
+
+__Update 2020-02-02:__ Added board mapping files for [Bart's v3.5 and v4 ESP32 boards](http://www.buildlog.net/blog/). v4 is now the default mapping. **For verification!** 
+
+---
+
 __Update 2019-11-25:__ Added basic support for Luc's [ESP3D-WEBUI](https://github.com/luc-github/ESP3D-webui) with a backend written from scratch utilizing GrblHALs function pointer based API.
 
 Currently missing is authentication and notification support, and possibly something else that I have overlooked. All GrblHAL settings are available from the GRBL configuration page, however the extended settings provided by GrblHAL does not show any help text. The ESP3D Settings page does not show settings not supported by this backend implementation.
@@ -75,13 +89,6 @@ Please note that this driver is not made using the Arduino IDE/framework, I am u
 
 ---
 
-The standard grbl/config.h should be modified with these changes at the top:
-
-```
-Add: #include "esp_attr.h"
-Change: #define ISR_CODE to #define ISR_CODE IRAM_ATTR
-```
-
 ### Credits:
 
 index.htm.gz is Copyright (c) 2019 Luc Lebosse - from his [ESP3D-WEBUI](https://github.com/luc-github/ESP3D-webui), I may have pulled a few lines from his backend code too.
@@ -91,4 +98,4 @@ dns_server.c is Copyright (c) 2019 Tony Pottier - from his [ESP32 WiFi Manager](
 Snippets of code is extracted from Espressif ESP-IDF examples which are public domain.
 
 ---
-2020-01-13
+2020-02-10

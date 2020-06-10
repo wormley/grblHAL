@@ -2,6 +2,7 @@
   config.h - compile time configuration
   Part of Grbl
 
+  Copyright (c) 2017-2020 Terje Io
   Copyright (c) 2012-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
@@ -28,6 +29,15 @@
 #ifndef _grbl_config_h_
 #define _grbl_config_h_
 
+#ifdef GRBL_ESP32
+#include "esp_attr.h"
+#define ISR_CODE IRAM_ATTR
+#else
+// Used to decorate code run in interrupt context.
+// Do not remove or change unless you know what you are doing.
+#define ISR_CODE
+#endif
+
 // Defines compatibility level with the grbl 1.1 protocol.
 // Additional G- and M-codes are not disabled except when level is set to >= 10.
 //  This does not apply to G- and M-codes dependent on driver and/or configuration settings disabled by stting level > 1.
@@ -39,9 +49,6 @@
 // NOTE: if switching to a level > 1 please reset EEPROM with $RST=* after reflashing!
 #define COMPATIBILITY_LEVEL 0
 
-// Used to decorate code run in interrupt context, is used by ESP32 driver
-// Do not remove or change unless you know what you are doing.
-#define ISR_CODE
 
 //#define KINEMATICS_API // Remove comment to add HAL entry points for custom kinematics
 
@@ -68,6 +75,12 @@
 #endif
 
 // #define DEBUGOUT // Remove comment to add HAL entry point for debug output
+
+// Add a short delay for each block processed in Check Mode to
+// avoid overwhelming the sender with fast reply messages.
+// This is likely to happen when streaming is done via a protocol where
+// the speed is not limited to 115200 baud. An example is native USB streaming.
+#define CHECK_MODE_DELAY 0 // ms
 
 // Define CPU pin map and default settings.
 // NOTE: OEMs can avoid the need to maintain/update the defaults.h and cpu_map.h files and use only
@@ -174,6 +187,17 @@
 // homing cycle while on the limit switch and not have to move the machine off of it.
 #define LIMITS_TWO_SWITCHES_ON_AXES 0 // Default 0 (disabled), set to 1 to enable
 
+// Upon a successful probe cycle, this option provides immediately feedback of the probe coordinates
+// through an automatically generated message. If disabled, users can still access the last probe
+// coordinates through Grbl '$#' print parameters.
+#define REPORT_PROBE_COORDINATES 1 // Default 1 (enabled), set to 0 to disable.
+
+// This option enables the safety door switch. A safety door, when triggered,
+// immediately forces a feed hold and then safely de-energizes the machine. Resuming is blocked until
+// the safety door is re-engaged. When it is, Grbl will re-energize the machine and then resume on the
+// previous tool path, as if nothing happened.
+// #define ENABLE_SAFETY_DOOR_INPUT_PIN // Default disabled. Uncomment to enable.
+
 // After the safety door switch has been toggled and restored, this setting sets the power-up delay
 // between restoring the spindle and coolant and resuming the cycle.
 #define SAFETY_DOOR_SPINDLE_DELAY 4.0f // Float (seconds)
@@ -276,6 +300,13 @@
 // to help minimize transmission waiting within the serial write protocol.
 // #define REPORT_ECHO_LINE_RECEIVED // Default disabled. Uncomment to enable.
 
+// Sets which axis the tool length offset is applied. Assumes the spindle is always parallel with
+// the selected axis with the tool oriented toward the negative direction. In other words, a positive
+// tool length offset value is subtracted from the current location.
+#if COMPATIBILITY_LEVEL > 2
+#define TOOL_LENGTH_OFFSET_AXIS Z_AXIS // Default z-axis. Valid values are X_AXIS, Y_AXIS, or Z_AXIS.
+#endif
+
 // Minimum planner junction speed. Sets the default minimum junction speed the planner plans to at
 // every buffer block junction, except for starting from rest and end of the buffer, which are always
 // zero. This value controls how fast the machine moves through junctions with no regard for acceleration
@@ -305,6 +336,12 @@
 // NOTE: Be very careful when adjusting this value. It should always be greater than 1.2e-7 but not too
 // much greater than this. The default setting should capture most, if not all, full arc error situations.
 #define ARC_ANGULAR_TRAVEL_EPSILON 5E-7f // Float (radians)
+
+// Default constants for G5 Cubic splines
+//
+#define BEZIER_MIN_STEP 0.002f
+#define BEZIER_MAX_STEP 0.1f
+#define BEZIER_SIGMA 0.1f
 
 // Time delay increments performed during a dwell. The default value is set at 50ms, which provides
 // a maximum time delay of roughly 55 minutes, more than enough for most any application. Increasing
